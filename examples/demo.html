@@ -1,0 +1,1110 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>企业级知识库工作台</title>
+  <style>
+    :root {
+      --bg: #f4f0e7;
+      --panel: rgba(255,255,255,0.82);
+      --ink: #1f1d1a;
+      --muted: #6d665d;
+      --line: #d8cfbf;
+      --accent: #0f766e;
+      --accent-2: #b45309;
+      --danger: #b91c1c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background:
+        radial-gradient(circle at top right, rgba(180,83,9,.09), transparent 30%),
+        radial-gradient(circle at left center, rgba(15,118,110,.08), transparent 28%),
+        linear-gradient(180deg, #f7f4ee 0%, #f2ece0 100%);
+    }
+    .shell {
+      max-width: 1380px;
+      margin: 0 auto;
+      padding: 28px 18px 48px;
+    }
+    .hero {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 24px;
+    }
+    .eyebrow {
+      color: var(--accent-2);
+      font-size: 12px;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(34px, 4vw, 56px);
+      line-height: 1.02;
+    }
+    .subtitle {
+      color: var(--muted);
+      line-height: 1.7;
+      max-width: 980px;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 380px minmax(0, 1fr);
+      gap: 20px;
+    }
+    .stack { display: grid; gap: 18px; align-content: start; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      box-shadow: 0 14px 30px rgba(31,29,26,.06);
+      backdrop-filter: blur(12px);
+    }
+    .section {
+      padding: 18px;
+      display: grid;
+      gap: 14px;
+    }
+    .section h2 {
+      margin: 0;
+      font-size: 18px;
+    }
+    .hint {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    label {
+      display: grid;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    input, select, textarea {
+      width: 100%;
+      padding: 12px 14px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+    }
+    input[type="file"] { padding: 10px; }
+    textarea { min-height: 110px; resize: vertical; }
+    .actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    button {
+      border: 0;
+      border-radius: 14px;
+      padding: 12px 14px;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 120ms ease, opacity 120ms ease;
+    }
+    button:hover { transform: translateY(-1px); }
+    button:disabled { opacity: .55; cursor: default; transform: none; }
+    .primary { background: var(--accent); color: #fff; }
+    .secondary { background: #efe7d8; color: var(--ink); }
+    .danger { background: #f5d7d7; color: var(--danger); }
+    .topbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+    .status {
+      font-size: 13px;
+      color: var(--muted);
+      min-height: 18px;
+    }
+    .pillbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .pill {
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      padding: 6px 10px;
+      font-size: 12px;
+      color: var(--muted);
+      background: #fff;
+    }
+    .docs {
+      display: grid;
+      gap: 10px;
+      max-height: 360px;
+      overflow: auto;
+    }
+    .doc-item {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 12px;
+      background: rgba(255,255,255,.74);
+      cursor: pointer;
+    }
+    .doc-item.active {
+      border-color: var(--accent);
+      box-shadow: inset 0 0 0 1px var(--accent);
+    }
+    .doc-title { font-weight: 700; margin-bottom: 6px; }
+    .doc-meta { font-size: 12px; color: var(--muted); line-height: 1.5; }
+    .results {
+      display: grid;
+      gap: 18px;
+    }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 16px;
+      background: rgba(255,255,255,.72);
+      display: grid;
+      gap: 10px;
+    }
+    .cards {
+      display: grid;
+      gap: 10px;
+    }
+    .mini-card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      padding: 12px;
+      display: grid;
+      gap: 6px;
+    }
+    .mini-title {
+      font-size: 13px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .06em;
+    }
+    .mini-body {
+      font-size: 14px;
+      line-height: 1.7;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    details {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255,255,255,.72);
+      padding: 12px 14px;
+    }
+    summary {
+      cursor: pointer;
+      font-weight: 700;
+    }
+    .panel h3 {
+      margin: 0;
+      font-size: 17px;
+    }
+    .answer {
+      white-space: pre-wrap;
+      line-height: 1.72;
+      font-size: 17px;
+    }
+    .bullet-list {
+      margin: 0;
+      padding-left: 18px;
+      line-height: 1.7;
+    }
+    .bullet-list li + li { margin-top: 8px; }
+    pre {
+      margin: 0;
+      max-height: 360px;
+      overflow: auto;
+      padding: 14px;
+      border-radius: 12px;
+      background: #1f1d1a;
+      color: #f5f3ef;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      padding: 12px;
+      display: grid;
+      gap: 4px;
+    }
+    .metric-label {
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .08em;
+    }
+    .metric-value {
+      font-size: 22px;
+      font-weight: 800;
+    }
+    .stepper {
+      display: grid;
+      gap: 8px;
+    }
+    .step {
+      display: grid;
+      grid-template-columns: 18px 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 12px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.7);
+    }
+    .step-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+      background: #d2c6b1;
+    }
+    .step.active .step-dot { background: var(--accent); }
+    .step.done .step-dot { background: var(--accent-2); }
+    .step-title { font-size: 14px; }
+    .step-meta { font-size: 12px; color: var(--muted); }
+    @media (max-width: 1100px) {
+      .layout { grid-template-columns: 1fr; }
+      .grid-2 { grid-template-columns: 1fr; }
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <div class="eyebrow">工作台</div>
+      <h1>企业级知识库工作台</h1>
+      <div class="subtitle">
+        这个页面不只是一个问答框，而是完整工作台：上传文档、跑完整入库流程、查看各阶段结果、验证召回、并生成黄金测试集。
+      </div>
+    </section>
+
+    <div class="layout">
+      <aside class="stack">
+        <section class="card section">
+          <h2>服务状态</h2>
+          <label>
+            接口地址
+            <input id="baseUrl" value="http://127.0.0.1:8000" />
+          </label>
+          <div class="actions">
+            <button id="checkBtn" class="secondary">检查接口</button>
+            <button id="refreshDocsBtn" class="secondary">刷新文档</button>
+          </div>
+          <div class="status" id="serverStatus"></div>
+        </section>
+
+        <section class="card section">
+          <h2>导入与构建</h2>
+          <label>
+            选择文件
+            <input id="fileInput" type="file" />
+          </label>
+          <div class="actions">
+            <button id="uploadBuildBtn" class="primary">上传并构建</button>
+            <button id="buildSelectedBtn" class="secondary">重建当前文档</button>
+          </div>
+          <div class="status" id="buildStatus"></div>
+          <div class="hint" id="jobHint"></div>
+          <div class="panel" style="padding:12px;">
+            <h3 style="margin:0 0 10px;">当前任务</h3>
+            <div style="height:10px;border-radius:999px;background:#efe7d8;overflow:hidden;">
+              <div id="jobProgressBar" style="height:100%;width:0%;background:var(--accent);transition:width 200ms ease;"></div>
+            </div>
+            <div class="hint" id="jobProgressText">暂无活动任务。</div>
+            <div class="stepper" id="jobStepper"></div>
+          </div>
+        </section>
+
+        <section class="card section">
+          <h2>文档列表</h2>
+          <div class="hint">点击文档查看阶段信息，也可对当前文档生成黄金测试集。</div>
+          <label>
+            搜索
+            <input id="docSearch" placeholder="按文件名或 DOC- 检索" />
+          </label>
+          <div class="actions">
+            <label>
+              解析状态
+              <select id="parseFilter">
+                <option value="">全部</option>
+                <option value="parsed">parsed</option>
+                <option value="failed">failed</option>
+                <option value="queued">queued</option>
+                <option value="processing">processing</option>
+              </select>
+            </label>
+            <label>
+              质量状态
+              <select id="qualityFilter">
+                <option value="">全部</option>
+                <option value="passed">passed</option>
+                <option value="review_required">review_required</option>
+                <option value="blocked">blocked</option>
+                <option value="pending">pending</option>
+              </select>
+            </label>
+          </div>
+          <div class="docs" id="docList"></div>
+          <div class="actions">
+            <button id="goldenBtn" class="secondary">生成黄金测试</button>
+            <button id="runGoldenBtn" class="secondary">执行黄金测试</button>
+            <button id="diagnosticsBtn" class="secondary">查看诊断</button>
+            <button id="showDetailBtn" class="secondary">加载详情</button>
+          </div>
+          <div class="status" id="docStatus"></div>
+        </section>
+
+        <section class="card section">
+          <h2>最近任务</h2>
+          <div class="docs" id="jobList"></div>
+        </section>
+
+        <section class="card section">
+          <h2>审计日志</h2>
+          <div class="hint">记录上传、构建、查询和黄金测试生成等操作。</div>
+          <div class="docs" id="auditList"></div>
+        </section>
+
+        <section class="card section">
+          <h2>检索与问答</h2>
+          <label>
+            模式
+            <select id="mode">
+              <option value="/answer-query">answer-query</option>
+              <option value="/agent-query">agent-query</option>
+              <option value="/query-context">query-context</option>
+            </select>
+          </label>
+          <label>
+            查询
+            <textarea id="query">什么是控制导引电路？</textarea>
+          </label>
+          <label>
+            返回数量
+            <input id="limit" type="number" min="1" max="20" value="6" />
+          </label>
+          <div class="actions">
+            <button id="runBtn" class="primary">执行查询</button>
+            <button id="fillBtn" class="secondary">示例问题</button>
+          </div>
+          <div class="status" id="queryStatus"></div>
+        </section>
+      </aside>
+
+      <main class="results">
+        <section class="card section">
+          <div class="topbar">
+            <h2 style="margin:0;">当前结果</h2>
+            <div class="pillbar" id="pillbar"></div>
+          </div>
+          <div class="grid-2">
+            <div class="panel">
+              <h3>直接答案</h3>
+              <div class="answer" id="directAnswer">尚未查询。</div>
+            </div>
+            <div class="panel">
+              <h3>文档详情</h3>
+              <div class="metrics" id="docMetrics"></div>
+              <ul class="bullet-list" id="docDetail"></ul>
+            </div>
+          </div>
+          <div class="grid-2">
+            <div class="panel">
+              <h3>摘要</h3>
+              <ul class="bullet-list" id="summaryList"></ul>
+            </div>
+            <div class="panel">
+              <h3>支撑事实</h3>
+              <div class="cards" id="factList"></div>
+            </div>
+          </div>
+          <div class="grid-2">
+            <div class="panel">
+              <h3>支撑证据</h3>
+              <div class="cards" id="evidenceList"></div>
+            </div>
+            <div class="panel">
+              <h3>生成的黄金测试</h3>
+              <div class="cards" id="goldenList"></div>
+            </div>
+          </div>
+          <div class="grid-2">
+            <div class="panel">
+              <h3>黄金集覆盖</h3>
+              <ul class="bullet-list" id="goldenCoverage"></ul>
+            </div>
+            <div class="panel">
+              <h3>黄金测试执行结果</h3>
+              <ul class="bullet-list" id="goldenRunSummary"></ul>
+              <pre id="goldenRunOutput"></pre>
+            </div>
+          </div>
+          <div class="grid-2">
+            <div class="panel">
+              <h3>文档诊断</h3>
+              <ul class="bullet-list" id="diagnosticsSummary"></ul>
+            </div>
+            <div class="panel">
+              <h3>诊断页集合</h3>
+              <ul class="bullet-list" id="diagnosticsPages"></ul>
+            </div>
+          </div>
+          <details>
+            <summary>原始 JSON</summary>
+            <pre id="rawJson">{}</pre>
+          </details>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <script>
+    const EXAMPLES = [
+      "什么是控制导引电路？",
+      "GB/T 18487.1—2023 的标准号和实施日期是什么？",
+      "什么是V2G？",
+      "GB/T 40432-2021 的标准号和实施日期是什么？",
+      "充电导引"
+    ];
+
+    const state = {
+      selectedDocId: null,
+      lastResult: null,
+      lastDetail: null,
+      lastGolden: null,
+      lastGoldenRun: null,
+      lastDiagnostics: null,
+      exampleIndex: 0,
+      currentJobId: null,
+      documents: []
+    };
+
+    const el = (id) => document.getElementById(id);
+
+    const baseUrlEl = el("baseUrl");
+    const modeEl = el("mode");
+    const queryEl = el("query");
+    const limitEl = el("limit");
+    const fileInputEl = el("fileInput");
+    const serverStatusEl = el("serverStatus");
+    const buildStatusEl = el("buildStatus");
+    const docStatusEl = el("docStatus");
+    const queryStatusEl = el("queryStatus");
+    const jobHintEl = el("jobHint");
+    const docListEl = el("docList");
+    const directAnswerEl = el("directAnswer");
+    const summaryListEl = el("summaryList");
+    const factListEl = el("factList");
+    const evidenceListEl = el("evidenceList");
+    const goldenListEl = el("goldenList");
+    const goldenCoverageEl = el("goldenCoverage");
+    const goldenRunSummaryEl = el("goldenRunSummary");
+    const goldenRunOutputEl = el("goldenRunOutput");
+    const diagnosticsSummaryEl = el("diagnosticsSummary");
+    const diagnosticsPagesEl = el("diagnosticsPages");
+    const docDetailEl = el("docDetail");
+    const pillbarEl = el("pillbar");
+    const rawJsonEl = el("rawJson");
+    const jobProgressBarEl = el("jobProgressBar");
+    const jobProgressTextEl = el("jobProgressText");
+    const jobStepperEl = el("jobStepper");
+    const jobListEl = el("jobList");
+    const docMetricsEl = el("docMetrics");
+    const auditListEl = el("auditList");
+    const docSearchEl = el("docSearch");
+    const parseFilterEl = el("parseFilter");
+    const qualityFilterEl = el("qualityFilter");
+
+    el("checkBtn").addEventListener("click", checkApiHealth);
+    el("refreshDocsBtn").addEventListener("click", loadDocuments);
+    el("refreshDocsBtn").addEventListener("click", loadJobs);
+    el("refreshDocsBtn").addEventListener("click", loadAuditLog);
+    el("uploadBuildBtn").addEventListener("click", uploadAndBuild);
+    el("buildSelectedBtn").addEventListener("click", buildSelectedDocument);
+    el("showDetailBtn").addEventListener("click", loadSelectedDocumentDetail);
+    el("diagnosticsBtn").addEventListener("click", loadDocumentDiagnostics);
+    el("goldenBtn").addEventListener("click", generateGoldenTests);
+    el("runGoldenBtn").addEventListener("click", runGoldenTests);
+    el("runBtn").addEventListener("click", runQuery);
+    el("fillBtn").addEventListener("click", () => {
+      queryEl.value = EXAMPLES[state.exampleIndex % EXAMPLES.length];
+      state.exampleIndex += 1;
+    });
+    docSearchEl.addEventListener("input", () => renderDocuments(state.documents));
+    parseFilterEl.addEventListener("change", () => renderDocuments(state.documents));
+    qualityFilterEl.addEventListener("change", () => renderDocuments(state.documents));
+
+    function api(path) {
+      return baseUrlEl.value.trim().replace(/\/$/, "") + path;
+    }
+
+    async function requestJson(path, payload, method = "POST") {
+      const options = { method, headers: { "Content-Type": "application/json" } };
+      if (payload !== undefined) options.body = JSON.stringify(payload);
+      const response = await fetch(api(path), options);
+      const json = await response.json();
+      if (!response.ok) {
+        throw new Error(json.message || json.error || `HTTP ${response.status}`);
+      }
+      return json;
+    }
+
+    async function checkApiHealth() {
+      setStatus(serverStatusEl, "正在检查接口...");
+      try {
+        const payload = await requestJson("/health", undefined, "GET");
+        const server = payload.server || {};
+        setStatus(serverStatusEl, `接口正常 · ${server.name || "server"} ${server.version || ""} · 启动于 ${server.started_at || "unknown"}`);
+      } catch (err) {
+        setStatus(serverStatusEl, `接口错误: ${err.message}`);
+      }
+    }
+
+    async function loadDocuments() {
+      setStatus(docStatusEl, "正在加载文档...");
+      try {
+        const payload = await requestJson("/documents", undefined, "GET");
+        state.documents = payload.documents || [];
+        renderDocuments(state.documents);
+        setStatus(docStatusEl, `已加载 ${state.documents.length} 个文档。`);
+      } catch (err) {
+        setStatus(docStatusEl, `加载失败: ${err.message}`);
+      }
+    }
+
+    function renderDocuments(documents) {
+      docListEl.innerHTML = "";
+      const query = docSearchEl.value.trim().toLowerCase();
+      const parseFilter = parseFilterEl.value;
+      const qualityFilter = qualityFilterEl.value;
+      const filtered = documents.filter((doc) => {
+        const matchesQuery =
+          !query ||
+          String(doc.doc_id || "").toLowerCase().includes(query) ||
+          String(doc.source_filename || "").toLowerCase().includes(query);
+        const matchesParse = !parseFilter || doc.parse_status === parseFilter;
+        const matchesQuality = !qualityFilter || doc.quality_status === qualityFilter;
+        return matchesQuery && matchesParse && matchesQuality;
+      });
+
+      for (const doc of filtered) {
+        const item = document.createElement("div");
+        item.className = "doc-item" + (state.selectedDocId === doc.doc_id ? " active" : "");
+        item.innerHTML = `
+          <div class="doc-title">${doc.source_filename}</div>
+          <div class="doc-meta">${doc.doc_id} · ${doc.source_type} · 页数 ${doc.page_count ?? "?"}</div>
+          <div class="doc-meta">解析: ${doc.parse_status} · 质量: ${doc.quality_status}</div>
+        `;
+        item.addEventListener("click", () => {
+          state.selectedDocId = doc.doc_id;
+          renderDocuments(documents);
+        });
+        docListEl.appendChild(item);
+      }
+      if (!filtered.length) {
+        docListEl.innerHTML = "<div class='hint'>没有匹配的文档。</div>";
+      }
+    }
+
+    async function loadJobs() {
+      try {
+        const payload = await requestJson("/jobs", undefined, "GET");
+        renderJobs(payload.jobs || []);
+      } catch (err) {
+        setStatus(docStatusEl, `任务列表加载失败: ${err.message}`);
+      }
+    }
+
+    function renderJobs(jobs) {
+      jobListEl.innerHTML = "";
+      if (!jobs.length) {
+        jobListEl.innerHTML = "<div class='hint'>暂无最近任务。</div>";
+        return;
+      }
+      for (const job of jobs) {
+        const item = document.createElement("div");
+        item.className = "doc-item";
+        item.innerHTML = `
+          <div class="doc-title">${job.job_type}</div>
+          <div class="doc-meta">${job.job_id}</div>
+          <div class="doc-meta">状态: ${job.status} · 阶段: ${job.stage} · ${job.progress}%</div>
+        `;
+        jobListEl.appendChild(item);
+      }
+    }
+
+    async function loadAuditLog() {
+      try {
+        const payload = await requestJson("/audit-log", undefined, "GET");
+        renderAudit(payload.events || []);
+      } catch (err) {
+        setStatus(docStatusEl, `审计日志加载失败: ${err.message}`);
+      }
+    }
+
+    function renderAudit(events) {
+      auditListEl.innerHTML = "";
+      if (!events.length) {
+        auditListEl.innerHTML = "<div class='hint'>暂无审计记录。</div>";
+        return;
+      }
+      for (const event of events.slice(0, 20)) {
+        const item = document.createElement("div");
+        item.className = "doc-item";
+        item.innerHTML = `
+          <div class="doc-title">${event.event_type}</div>
+          <div class="doc-meta">${event.timestamp}</div>
+          <div class="doc-meta">${JSON.stringify(event.payload || {}, null, 0)}</div>
+        `;
+        auditListEl.appendChild(item);
+      }
+    }
+
+    async function uploadAndBuild() {
+      const file = fileInputEl.files && fileInputEl.files[0];
+      if (!file) {
+        setStatus(buildStatusEl, "请先选择文件。");
+        return;
+      }
+      setBusy(true);
+      setStatus(buildStatusEl, `正在上传 ${file.name} ...`);
+      try {
+        const contentBase64 = await fileToBase64(file);
+        const payload = await requestJson("/start-upload-build", {
+          filename: file.name,
+          content_base64: contentBase64
+        });
+        state.currentJobId = payload.job_id;
+        setStatus(buildStatusEl, `任务已入队: ${payload.job_id}`);
+        await pollJob(payload.job_id, "upload-build");
+      } catch (err) {
+        setStatus(buildStatusEl, `构建失败: ${err.message}`);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function buildSelectedDocument() {
+      if (!state.selectedDocId) {
+        setStatus(buildStatusEl, "请先选择一个文档。");
+        return;
+      }
+      setBusy(true);
+      setStatus(buildStatusEl, `正在构建 ${state.selectedDocId} ...`);
+      try {
+        const payload = await requestJson("/start-build-document", { doc_id: state.selectedDocId });
+        state.currentJobId = payload.job_id;
+        setStatus(buildStatusEl, `任务已入队: ${payload.job_id}`);
+        await pollJob(payload.job_id, "build-document");
+      } catch (err) {
+        setStatus(buildStatusEl, `构建失败: ${err.message}`);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function loadSelectedDocumentDetail() {
+      if (!state.selectedDocId) {
+        setStatus(docStatusEl, "请先选择一个文档。");
+        return;
+      }
+      setStatus(docStatusEl, `正在加载 ${state.selectedDocId} 详情 ...`);
+      try {
+        const payload = await requestJson("/document-detail", { doc_id: state.selectedDocId });
+        state.lastDetail = payload;
+        renderDocumentDetail(payload);
+        setStatus(docStatusEl, `已加载 ${state.selectedDocId} 详情。`);
+      } catch (err) {
+        setStatus(docStatusEl, `详情加载失败: ${err.message}`);
+      }
+    }
+
+    async function loadDocumentDiagnostics() {
+      if (!state.selectedDocId) {
+        setStatus(docStatusEl, "请先选择一个文档。");
+        return;
+      }
+      setStatus(docStatusEl, `正在加载 ${state.selectedDocId} 诊断 ...`);
+      try {
+        const payload = await requestJson("/document-diagnostics", { doc_id: state.selectedDocId });
+        state.lastDiagnostics = payload;
+        renderDiagnostics(payload);
+        setStatus(docStatusEl, `已加载 ${state.selectedDocId} 诊断。`);
+      } catch (err) {
+        setStatus(docStatusEl, `诊断加载失败: ${err.message}`);
+      }
+    }
+
+    async function generateGoldenTests() {
+      if (!state.selectedDocId) {
+        setStatus(docStatusEl, "请先选择一个文档。");
+        return;
+      }
+      setStatus(docStatusEl, `正在为 ${state.selectedDocId} 生成黄金测试 ...`);
+      try {
+        const payload = await requestJson("/generate-golden-tests", { doc_id: state.selectedDocId });
+        state.lastGolden = payload;
+        renderGolden(payload);
+        setStatus(docStatusEl, `已生成 ${payload.case_count} 条黄金测试。`);
+      } catch (err) {
+        setStatus(docStatusEl, `黄金测试生成失败: ${err.message}`);
+      }
+    }
+
+    async function runGoldenTests() {
+      if (!state.selectedDocId) {
+        setStatus(docStatusEl, "请先选择一个文档。");
+        return;
+      }
+      setStatus(docStatusEl, `正在执行 ${state.selectedDocId} 的黄金测试 ...`);
+      setBusy(true);
+      try {
+        const payload = await requestJson("/run-golden-tests", { doc_id: state.selectedDocId });
+        state.lastGoldenRun = payload;
+        renderGoldenRun(payload);
+        setStatus(docStatusEl, payload.success ? `黄金测试通过: ${payload.passed} 通过` : `黄金测试失败: ${payload.failed} 失败`);
+      } catch (err) {
+        setStatus(docStatusEl, `黄金测试执行失败: ${err.message}`);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function runQuery() {
+      const query = queryEl.value.trim();
+      const mode = modeEl.value;
+      const limit = Number(limitEl.value || 6);
+      if (!query) {
+        setStatus(queryStatusEl, "请输入查询内容。");
+        return;
+      }
+      setBusy(true);
+      setStatus(queryStatusEl, "正在执行查询...");
+      clearResult();
+      try {
+        const payload = await requestJson(mode, { query, limit });
+        state.lastResult = payload;
+        renderResult(payload.final_answer || payload);
+        rawJsonEl.textContent = JSON.stringify(payload, null, 2);
+        setStatus(queryStatusEl, "查询完成。");
+      } catch (err) {
+        setStatus(queryStatusEl, `查询失败: ${err.message}`);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function pollJob(jobId, label) {
+      setStatus(jobHintEl, `正在跟踪 ${label} 任务 ${jobId} ...`);
+      while (true) {
+        const payload = await requestJson("/job-status", { job_id: jobId });
+        setStatus(jobHintEl, `阶段: ${payload.stage} · ${payload.progress}%`);
+        updateJobProgress(payload);
+        await loadJobs();
+        if (payload.status === "completed") {
+          state.lastResult = payload.result;
+          if (payload.result && payload.result.doc_id) {
+            state.selectedDocId = payload.result.doc_id;
+          }
+          renderResult(payload.result || {});
+          await loadDocuments();
+          if (state.selectedDocId) {
+            await loadSelectedDocumentDetail();
+          }
+          setStatus(buildStatusEl, `任务 ${jobId} 已完成。`);
+          break;
+        }
+        if (payload.status === "failed") {
+          setStatus(buildStatusEl, `任务 ${jobId} 失败: ${payload.error}`);
+          updateJobProgress(payload);
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
+
+    function updateJobProgress(job) {
+      const progress = Number(job.progress || 0);
+      jobProgressBarEl.style.width = `${progress}%`;
+      jobProgressTextEl.textContent = `${job.job_type} · ${job.stage} · ${progress}%`;
+      renderJobStepper(job);
+    }
+
+    function renderJobStepper(job) {
+      const stageOrder = ["queued", "starting", "ingest", "parse", "quality", "evidence", "facts", "entities", "wiki", "graph", "completed"];
+      const history = job.history || [];
+      const historyMap = new Map(history.map((item) => [item.stage, item.progress]));
+      const activeIndex = Math.max(stageOrder.indexOf(job.stage), 0);
+
+      jobStepperEl.innerHTML = "";
+      for (const [index, stage] of stageOrder.entries()) {
+        const node = document.createElement("div");
+        const state = index < activeIndex ? "done" : index === activeIndex ? "active" : "";
+        node.className = `step ${state}`.trim();
+        node.innerHTML = `
+          <div class="step-dot"></div>
+          <div class="step-title">${stage}</div>
+          <div class="step-meta">${historyMap.has(stage) ? `${historyMap.get(stage)}%` : ""}</div>
+        `;
+        jobStepperEl.appendChild(node);
+      }
+    }
+
+    function renderResult(result) {
+      const answer = result.final_answer || result;
+      directAnswerEl.textContent = answer.direct_answer || "没有直接答案。";
+      rawJsonEl.textContent = JSON.stringify(result, null, 2);
+
+      renderList(summaryListEl, answer.summary || [], (item) => item);
+      renderCards(
+        factListEl,
+        answer.supporting_facts || answer.facts || [],
+        (item) => ({
+          title: item.fact_type || item.result_type || "fact",
+          body: typeof (item.object || item.object_value || item.snippet || "") === "string"
+            ? (item.object || item.object_value || item.snippet || "")
+            : JSON.stringify(item.object || item.object_value || item.snippet || ""),
+          meta: item.doc_id ? `${item.doc_id}` : ""
+        })
+      );
+      renderCards(
+        evidenceListEl,
+        answer.supporting_evidence || answer.evidence || [],
+        (item) => ({
+          title: `${item.doc_id || ""} p.${item.page_no || "?"}`,
+          body: item.snippet || item.normalized_text || "",
+          meta: item.confidence !== undefined ? `confidence ${item.confidence}` : ""
+        })
+      );
+
+      pillbarEl.innerHTML = "";
+      const docs = (result.context && result.context.documents) || result.documents || [];
+      for (const value of [
+        `模式: ${modeEl.value.replace("/", "")}`,
+        `文档: ${docs.length}`,
+        `警告: ${(answer.warnings || []).length}`
+      ]) {
+        const pill = document.createElement("span");
+        pill.className = "pill";
+        pill.textContent = value;
+        pillbarEl.appendChild(pill);
+      }
+    }
+
+    function renderDocumentDetail(payload) {
+      docMetricsEl.innerHTML = "";
+      const lines = [];
+      if (payload.document) {
+        lines.push(`${payload.document.source_filename} (${payload.document.doc_id})`);
+        lines.push(`解析: ${payload.document.parse_status} · 质量: ${payload.document.quality_status}`);
+      }
+      if (payload.counts) {
+        const metrics = [
+          ["页数", payload.counts.pages],
+          ["证据", payload.counts.evidence],
+          ["事实", payload.counts.facts],
+          ["图谱", payload.counts.graph_edges],
+        ];
+        for (const [label, value] of metrics) {
+          const card = document.createElement("div");
+          card.className = "metric";
+          card.innerHTML = `<div class="metric-label">${label}</div><div class="metric-value">${value}</div>`;
+          docMetricsEl.appendChild(card);
+        }
+        lines.push(`页数: ${payload.counts.pages}`);
+        lines.push(`分块: ${payload.counts.blocks}`);
+        lines.push(`证据: ${payload.counts.evidence}`);
+        lines.push(`事实: ${payload.counts.facts}`);
+        lines.push(`Wiki: ${payload.counts.wiki_pages}`);
+        lines.push(`图谱边: ${payload.counts.graph_edges}`);
+      }
+      if (payload.quality) {
+        lines.push(`质量分: ${payload.quality.overall_score}`);
+        lines.push(`高风险页: ${payload.quality.high_risk_page_count}`);
+      }
+      renderList(docDetailEl, lines, (item) => item);
+      rawJsonEl.textContent = JSON.stringify(payload, null, 2);
+    }
+
+    function renderGolden(payload) {
+      renderCards(
+        goldenListEl,
+        payload.cases || [],
+        (item) => ({
+          title: item.kind === "standard" ? "标准问答" : item.kind === "definition" ? "定义问答" : (item.kind || "用例"),
+          body: item.query || "",
+          meta: [
+            item.must_include ? `必须包含: ${item.must_include}` : "",
+            item.page_no ? `页码: ${item.page_no}` : "",
+            item.source ? `来源: ${item.source}` : "",
+          ].filter(Boolean).join(" · ")
+        })
+      );
+      renderList(
+        goldenCoverageEl,
+        [
+          `目标条数: ${payload.target_case_count ?? "-"}`,
+          `实际条数: ${payload.case_count ?? "-"}`,
+          `网络候选: ${payload.network_candidate_count ?? "-"}`,
+          `网络生成: ${payload.network_case_count ?? "-"}`,
+          `本地补齐: ${payload.local_case_count ?? "-"}`,
+          `覆盖页数: ${payload.page_coverage_count ?? "-"}`,
+          `未覆盖页: ${(payload.uncovered_pages || []).length ? (payload.uncovered_pages || []).join(", ") : "无"}`
+        ],
+        (item) => item
+      );
+      rawJsonEl.textContent = JSON.stringify(payload, null, 2);
+    }
+
+    function renderGoldenRun(payload) {
+      renderList(
+        goldenRunSummaryEl,
+        [
+          `执行结果: ${payload.success ? "通过" : "失败"}`,
+          `通过数: ${payload.passed ?? 0}`,
+          `失败数: ${payload.failed ?? 0}`,
+          `返回码: ${payload.return_code ?? "-"}`,
+          `用例文件: ${payload.pytest_path || "-"}`
+        ],
+        (item) => item
+      );
+      goldenRunOutputEl.textContent = payload.output || "暂无执行输出。";
+      rawJsonEl.textContent = JSON.stringify(payload, null, 2);
+    }
+
+    function renderDiagnostics(payload) {
+      const coverage = payload.coverage || {};
+      const counts = payload.counts || {};
+      const pageSets = payload.page_sets || {};
+      renderList(
+        diagnosticsSummaryEl,
+        [
+          `可问答性评分: ${coverage.answerability_score ?? "-"}`,
+          `Metadata 覆盖分: ${coverage.metadata_score ?? "-"}`,
+          `有效文本页: ${counts.effective_text_page_count ?? "-"}`,
+          `证据数: ${counts.evidence_count ?? "-"}`,
+          `事实数: ${counts.fact_count ?? "-"}`,
+          `术语定义数: ${counts.term_definition_count ?? "-"}`,
+          `弱页/空页数: ${counts.empty_or_weak_page_count ?? "-"}`,
+          `高风险页数: ${counts.high_risk_page_count ?? "-"}`,
+          `告警: ${(payload.warnings || []).length ? payload.warnings.join("；") : "无"}`
+        ],
+        (item) => item
+      );
+      renderList(
+        diagnosticsPagesEl,
+        [
+          `有效文本页: ${(pageSets.effective_text_pages || []).length ? pageSets.effective_text_pages.join(", ") : "无"}`,
+          `弱页/空页: ${(pageSets.empty_or_weak_pages || []).length ? pageSets.empty_or_weak_pages.join(", ") : "无"}`,
+          `高风险页: ${(pageSets.high_risk_pages || []).length ? pageSets.high_risk_pages.join(", ") : "无"}`
+        ],
+        (item) => item
+      );
+      rawJsonEl.textContent = JSON.stringify(payload, null, 2);
+    }
+
+    function renderList(container, items, formatter) {
+      container.innerHTML = "";
+      if (!items.length) {
+        container.innerHTML = "<li>暂无内容。</li>";
+        return;
+      }
+      for (const item of items) {
+        const li = document.createElement("li");
+        li.textContent = formatter(item);
+        container.appendChild(li);
+      }
+    }
+
+    function renderCards(container, items, formatter) {
+      container.innerHTML = "";
+      if (!items.length) {
+        container.innerHTML = "<div class='hint'>暂无内容。</div>";
+        return;
+      }
+      for (const item of items) {
+        const card = document.createElement("div");
+        card.className = "mini-card";
+        const view = formatter(item);
+        card.innerHTML = `
+          <div class="mini-title">${view.title || ""}</div>
+          <div class="mini-body">${escapeHtml(view.body || "")}</div>
+          ${view.meta ? `<div class="hint">${escapeHtml(view.meta)}</div>` : ""}
+        `;
+        container.appendChild(card);
+      }
+    }
+
+    function clearResult() {
+      directAnswerEl.textContent = "处理中...";
+      summaryListEl.innerHTML = "";
+      factListEl.innerHTML = "";
+      evidenceListEl.innerHTML = "";
+      goldenListEl.innerHTML = "";
+      goldenCoverageEl.innerHTML = "";
+      goldenRunSummaryEl.innerHTML = "";
+      goldenRunOutputEl.textContent = "";
+      diagnosticsSummaryEl.innerHTML = "";
+      diagnosticsPagesEl.innerHTML = "";
+      docDetailEl.innerHTML = "";
+      pillbarEl.innerHTML = "";
+      rawJsonEl.textContent = "{}";
+    }
+
+    function setBusy(busy) {
+      for (const id of ["runBtn", "fillBtn", "checkBtn", "refreshDocsBtn", "uploadBuildBtn", "buildSelectedBtn", "showDetailBtn", "goldenBtn", "runGoldenBtn", "diagnosticsBtn"]) {
+        el(id).disabled = busy;
+      }
+    }
+
+    function setStatus(node, text) {
+      node.textContent = text;
+    }
+
+    function fileToBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = String(reader.result || "");
+          const base64 = result.includes(",") ? result.split(",")[1] : result;
+          resolve(base64);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function escapeHtml(text) {
+      return String(text)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+
+    checkApiHealth();
+    loadDocuments();
+    loadJobs();
+    loadAuditLog();
+  </script>
+</body>
+</html>
