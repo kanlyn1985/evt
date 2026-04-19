@@ -17,9 +17,10 @@ def answer_query(
     workspace_root: Path,
     query: str,
     limit: int = 8,
+    preferred_doc_id: str | None = None,
 ) -> dict[str, object]:
     rewritten = rewrite_query(query)
-    context = build_query_context(workspace_root, query, limit=limit)
+    context = build_query_context(workspace_root, query, limit=limit, preferred_doc_id=preferred_doc_id)
     intent = _intent_from_query_type(rewritten.query_type)
     answer_mode = select_answer_policy(rewritten.query_type)
     exact_terms = _extract_exact_terms(query)
@@ -47,7 +48,7 @@ def answer_query(
             "graph_edges": [],
             "wiki_pages": [],
         }
-    primary_doc_id = _choose_primary_doc_id(workspace_root, query, context, intent)
+    primary_doc_id = preferred_doc_id or _choose_primary_doc_id(workspace_root, query, context, intent)
 
     if primary_doc_id:
         context = _restrict_context_to_doc(workspace_root, context, primary_doc_id)
@@ -121,6 +122,7 @@ def answer_query(
     return {
         "query": query,
         "rewrite": rewritten.to_dict(),
+        "preferred_doc_id": preferred_doc_id,
         "answer_mode": answer_mode,
         "confidence_score": confidence_score,
         "direct_answer": direct_answer,
@@ -296,8 +298,20 @@ def _augment_facts(
             extra = [_row_to_fact(row) for row in rows]
         else:
             normalized_query = _normalize_query_phrase(query)
-            if re.search(r"表\s*\d+", query):
-                rows = connection.execute(
+            if re.search(r"(CC|阻值|电阻|参数值)", query, re.I):
+                parameter_rows = connection.execute(
+                    """
+                    SELECT fact_id, fact_type, predicate, object_value, confidence,
+                           source_doc_id, subject_entity_id, object_entity_id, qualifiers_json
+                    FROM facts
+                    WHERE source_doc_id = ?
+                      AND fact_type = 'parameter_value'
+                    ORDER BY confidence DESC, fact_id ASC
+                    LIMIT 20
+                    """,
+                    (doc_id,),
+                ).fetchall()
+                supplemental_rows = connection.execute(
                     """
                     SELECT fact_id, fact_type, predicate, object_value, confidence,
                            source_doc_id, subject_entity_id, object_entity_id, qualifiers_json
@@ -305,10 +319,37 @@ def _augment_facts(
                     WHERE source_doc_id = ?
                       AND fact_type IN ('table_requirement', 'requirement', 'threshold')
                     ORDER BY confidence DESC, fact_id ASC
-                    LIMIT 20
+                    LIMIT 30
                     """,
                     (doc_id,),
                 ).fetchall()
+                rows = [*parameter_rows, *supplemental_rows]
+            elif re.search(r"表\s*\d+", query):
+                table_rows = connection.execute(
+                    """
+                    SELECT fact_id, fact_type, predicate, object_value, confidence,
+                           source_doc_id, subject_entity_id, object_entity_id, qualifiers_json
+                    FROM facts
+                    WHERE source_doc_id = ?
+                      AND fact_type = 'table_requirement'
+                    ORDER BY confidence DESC, fact_id ASC
+                    LIMIT 8
+                    """,
+                    (doc_id,),
+                ).fetchall()
+                other_rows = connection.execute(
+                    """
+                    SELECT fact_id, fact_type, predicate, object_value, confidence,
+                           source_doc_id, subject_entity_id, object_entity_id, qualifiers_json
+                    FROM facts
+                    WHERE source_doc_id = ?
+                      AND fact_type IN ('requirement', 'threshold', 'parameter_value')
+                    ORDER BY confidence DESC, fact_id ASC
+                    LIMIT 12
+                    """,
+                    (doc_id,),
+                ).fetchall()
+                rows = [*table_rows, *other_rows]
             else:
                 rows = connection.execute(
                     """
@@ -316,7 +357,7 @@ def _augment_facts(
                            source_doc_id, subject_entity_id, object_entity_id, qualifiers_json
                     FROM facts
                     WHERE source_doc_id = ?
-                      AND fact_type IN ('requirement', 'table_requirement', 'threshold')
+                      AND fact_type IN ('requirement', 'table_requirement', 'threshold', 'parameter_value')
                       AND object_value LIKE ?
                     ORDER BY confidence DESC, fact_id ASC
                     LIMIT 12
@@ -436,6 +477,7 @@ def _context_has_exact_definition_signal(context: dict[str, object], exact_terms
 
 def _rank_facts(facts: list[dict[str, object]], intent: str, query: str = "") -> list[dict[str, object]]:
     target_standard = _normalize_standard_code(_extract_standard_from_query(query)) if intent == "standard" else None
+    requested_table_no = _extract_table_no_from_query(query)
     def score(item: dict[str, object]) -> tuple[float, float]:
         fact_type = item.get("fact_type")
         confidence = float(item.get("confidence") or 0)
@@ -465,13 +507,29 @@ def _rank_facts(facts: list[dict[str, object]], intent: str, query: str = "") ->
                 bonus = 1.8
             elif fact_type == "table_requirement":
                 bonus = 1.6
+            elif fact_type == "parameter_value":
+                bonus = 2.4
             if re.search(r"表\s*\d+", query) and fact_type == "table_requirement":
-                bonus += 1.2
+                bonus += 3.0
+                payload = item.get("object_value")
+                if isinstance(payload, dict):
+                    table_no = str(payload.get("table_no") or "").strip()
+                    if requested_table_no and table_no == requested_table_no:
+                        bonus += 4.0
+                    elif requested_table_no and table_no and table_no != requested_table_no:
+                        bonus -= 2.0
             if re.search(r"(字段|表头|参数)", query) and fact_type == "table_requirement":
-                bonus += 0.8
+                bonus += 2.0
+            if re.search(r"(阻值|参数|电阻|CC)", query) and fact_type == "parameter_value":
+                bonus += 3.0
         return (bonus + confidence, confidence)
 
     return sorted(facts, key=score, reverse=True)
+
+
+def _extract_table_no_from_query(query: str) -> str | None:
+    match = re.search(r"表\s*(\d+)", query)
+    return match.group(1) if match else None
 
 
 def _select_supporting_evidence(

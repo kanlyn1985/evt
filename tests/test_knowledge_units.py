@@ -19,3 +19,4 @@ def test_extract_knowledge_units_from_cleaned_doc_ir() -> None:
     assert structured_requirements
     structured_tables = [unit for unit in bundle.units if unit.type == "table_requirement" and unit.headers]
     assert structured_tables
+    assert any(unit.type == "table_requirement" and unit.table_no for unit in bundle.units)

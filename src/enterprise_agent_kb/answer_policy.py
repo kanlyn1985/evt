@@ -192,16 +192,29 @@ def _build_comparison_answer(
 
 
 def _build_requirement_answer(query: str, facts: list[dict[str, object]]) -> str:
+    if any(token in query for token in ("阻值", "电阻", "参数")):
+        parameter_answer = _build_parameter_answer(query, facts)
+        if parameter_answer:
+            return parameter_answer
+
     if "表" in query and any(token in query for token in ("字段", "列", "表头", "参数")):
+        table_match = __import__("re").search(r"表\s*(\d+)", query)
+        requested_table_no = table_match.group(1) if table_match else None
         for item in facts:
             if item.get("fact_type") == "table_requirement" and isinstance(item.get("object"), dict):
                 payload = item["object"]
+                if requested_table_no and str(payload.get("table_no") or "") != requested_table_no:
+                    continue
                 title = str(payload.get("table_title") or payload.get("title") or "").strip()
                 headers = payload.get("headers") or []
                 rows = payload.get("rows") or []
                 if headers:
                     preview = "；".join(str(cell) for cell in rows[0]) if rows else ""
                     return f"{title or '该表'} 的字段包括：{'、'.join(str(h) for h in headers)}。{('示例行：' + preview + '。') if preview else ''}"
+
+    aggregated = _aggregate_requirement_facts(query, facts)
+    if aggregated:
+        return aggregated
 
     for item in facts:
         if item.get("fact_type") == "requirement" and isinstance(item.get("object"), dict):
@@ -228,3 +241,96 @@ def _build_requirement_answer(query: str, facts: list[dict[str, object]]) -> str
             if subject and value:
                 return f"{subject} 的关键阈值是 {value}。"
     return ""
+
+
+def _build_parameter_answer(query: str, facts: list[dict[str, object]]) -> str:
+    parameter_rows = []
+    for item in facts:
+        if item.get("fact_type") != "parameter_value":
+            continue
+        payload = item.get("object")
+        if not isinstance(payload, dict):
+            continue
+        parameter = str(payload.get("parameter", "")).strip()
+        symbol = str(payload.get("symbol", "")).strip()
+        unit = str(payload.get("unit", "")).strip()
+        nominal = str(payload.get("nominal_value", "")).strip()
+        state = str(payload.get("state", "")).strip()
+
+        if "CC" in query.upper():
+            if "CC" not in state.upper() and "CC" not in parameter.upper() and "CC" not in symbol.upper():
+                if not (symbol.startswith("R") and unit == "Ω"):
+                    continue
+        if "阻值" in query or "电阻" in query:
+            if unit != "Ω" and not symbol.startswith("R") and "电阻" not in parameter:
+                continue
+
+        parameter_rows.append((parameter, symbol, nominal, unit, state))
+
+    if not parameter_rows:
+        return ""
+
+    rendered = []
+    for parameter, symbol, nominal, unit, state in parameter_rows[:8]:
+        piece = f"{parameter or symbol}"
+        if symbol:
+            piece += f"（{symbol}）"
+        if nominal:
+            piece += f" = {nominal}"
+            if unit:
+                piece += unit
+        if state:
+            piece += f"（{state}）"
+        rendered.append(piece)
+    return "相关参数包括：" + "；".join(rendered) + "。"
+
+
+def _aggregate_requirement_facts(query: str, facts: list[dict[str, object]]) -> str:
+    requirement_items = []
+    for item in facts:
+        if item.get("fact_type") != "requirement":
+            continue
+        payload = item.get("object")
+        if isinstance(payload, dict):
+            requirement_items.append(payload)
+
+    if not requirement_items:
+        return ""
+
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for payload in requirement_items:
+        key = str(payload.get("title") or payload.get("subject") or "")
+        if key:
+            grouped.setdefault(key, []).append(payload)
+
+    normalized_query = _norm(query)
+    for key, items in grouped.items():
+        if _norm(key) and _norm(key) in normalized_query:
+            return _render_requirement_group(key, items)
+        subject = str(items[0].get("subject") or "")
+        if _norm(subject) and _norm(subject) in normalized_query:
+            return _render_requirement_group(subject or key, items)
+    return ""
+
+
+def _render_requirement_group(title: str, items: list[dict[str, object]]) -> str:
+    rendered: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        content = str(item.get("content", "")).strip()
+        if not content:
+            continue
+        normalized = _norm(content)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        rendered.append(content.rstrip("。；;") + "。")
+    if not rendered:
+        return ""
+    if len(rendered) == 1:
+        return rendered[0]
+    return f"{title} 的要求包括：" + " ".join(f"{index + 1}. {text}" for index, text in enumerate(rendered[:6]))
+
+
+def _norm(value: str) -> str:
+    return "".join(str(value).split()).lower()

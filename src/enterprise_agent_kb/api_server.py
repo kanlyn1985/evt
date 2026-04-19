@@ -129,14 +129,16 @@ class ApiRequestHandler(BaseHTTPRequestHandler):
     def _handle_query_context(self, body: dict[str, Any]) -> None:
         query = str(body.get("query", "")).strip()
         limit = int(body.get("limit", 8))
-        result = build_query_context(self.server.workspace_root, query, limit=limit)
+        preferred_doc_id = str(body.get("preferred_doc_id", "")).strip() or None
+        result = build_query_context(self.server.workspace_root, query, limit=limit, preferred_doc_id=preferred_doc_id)
         self._record_audit("query_context", {"query": query, "limit": limit, "hit_count": result.get("hit_count", 0)})
         self._write_json(HTTPStatus.OK, result)
 
     def _handle_answer_query(self, body: dict[str, Any]) -> None:
         query = str(body.get("query", "")).strip()
         limit = int(body.get("limit", 8))
-        result = answer_query(self.server.workspace_root, query, limit=limit)
+        preferred_doc_id = str(body.get("preferred_doc_id", "")).strip() or None
+        result = answer_query(self.server.workspace_root, query, limit=limit, preferred_doc_id=preferred_doc_id)
         self._record_audit(
             "answer_query",
             {"query": query, "limit": limit, "direct_answer": str(result.get("direct_answer", ""))[:200]},

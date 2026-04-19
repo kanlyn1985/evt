@@ -24,6 +24,7 @@ def build_query_context(
     workspace_root: Path,
     query: str,
     limit: int = 8,
+    preferred_doc_id: str | None = None,
 ) -> dict[str, object]:
     query = query.strip()
     rewritten = rewrite_query(query)
@@ -48,6 +49,11 @@ def build_query_context(
         routed = route_retrieval(paths.root, rewritten, limit=max(limit * 3, 20), connection=connection)
         reranked_hits = rerank_candidates(paths.root, rewritten, routed["hits"], limit=max(limit * 3, 20), connection=connection)
         hits = [hit for hit in reranked_hits if hit["result_type"] != "document"]
+        if preferred_doc_id:
+            preferred_doc_id = preferred_doc_id.strip()
+            filtered_hits = [hit for hit in hits if hit.get("doc_id") == preferred_doc_id]
+            if filtered_hits:
+                hits = filtered_hits
         hits = _filter_hits_for_exact_terms(rewritten, hits)
         hits = _inject_exact_standard_hits(connection, query, hits, max(limit * 3, 20))
         hits.sort(key=lambda item: float(item["score"] or 0), reverse=True)
@@ -169,6 +175,7 @@ def build_query_context(
         return {
             "query": query,
             "rewrite": rewritten.to_dict(),
+            "preferred_doc_id": preferred_doc_id,
             "retrieval_plan": {
                 "query_type": routed["query_type"],
                 "channels": routed["channels"],

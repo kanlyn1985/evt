@@ -395,6 +395,10 @@
               <option value="/query-context">query-context</option>
             </select>
           </label>
+          <label style="display:flex;align-items:center;gap:8px;color:var(--ink);">
+            <input id="pinDocQuery" type="checkbox" style="width:auto;" />
+            限定当前文档
+          </label>
           <label>
             查询
             <textarea id="query">什么是控制导引电路？</textarea>
@@ -505,6 +509,7 @@
     const modeEl = el("mode");
     const queryEl = el("query");
     const limitEl = el("limit");
+    const pinDocQueryEl = el("pinDocQuery");
     const fileInputEl = el("fileInput");
     const serverStatusEl = el("serverStatus");
     const buildStatusEl = el("buildStatus");
@@ -794,6 +799,7 @@
       const query = queryEl.value.trim();
       const mode = modeEl.value;
       const limit = Number(limitEl.value || 6);
+      const preferredDocId = pinDocQueryEl.checked ? (state.selectedDocId || null) : null;
       if (!query) {
         setStatus(queryStatusEl, "请输入查询内容。");
         return;
@@ -802,7 +808,7 @@
       setStatus(queryStatusEl, "正在执行查询...");
       clearResult();
       try {
-        const payload = await requestJson(mode, { query, limit });
+        const payload = await requestJson(mode, { query, limit, preferred_doc_id: preferredDocId });
         state.lastResult = payload;
         renderResult(payload.final_answer || payload);
         rawJsonEl.textContent = JSON.stringify(payload, null, 2);
@@ -902,6 +908,7 @@
       for (const value of [
         `模式: ${modeEl.value.replace("/", "")}`,
         `文档: ${docs.length}`,
+        `限定文档: ${result.preferred_doc_id || (pinDocQueryEl.checked ? (state.selectedDocId || "未选中") : "关闭")}`,
         `警告: ${(answer.warnings || []).length}`
       ]) {
         const pill = document.createElement("span");

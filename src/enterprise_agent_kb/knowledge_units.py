@@ -19,6 +19,7 @@ class KnowledgeUnit:
     condition: str | None = None
     threshold: str | None = None
     table_title: str | None = None
+    table_no: str | None = None
     headers: list[str] | None = None
     rows: list[list[str]] | None = None
 
@@ -74,6 +75,7 @@ def extract_knowledge_units(cleaned_doc_ir_path: Path) -> KnowledgeUnitBundle:
             if block_type == "table":
                 title = current_heading or f"page_{page_no}_table"
                 table_title = _infer_table_title(blocks, index, current_heading)
+                table_no = _extract_table_no(table_title or title)
                 headers, rows = _parse_html_table(text)
                 units.append(
                     KnowledgeUnit(
@@ -84,6 +86,7 @@ def extract_knowledge_units(cleaned_doc_ir_path: Path) -> KnowledgeUnitBundle:
                         section=current_section,
                         page=page_no,
                         table_title=table_title,
+                        table_no=table_no,
                         headers=headers,
                         rows=rows,
                     )
@@ -277,9 +280,19 @@ def _looks_like_reference_line(text: str) -> bool:
 def _infer_table_title(blocks: list[dict[str, object]], index: int, current_heading: str) -> str | None:
     if index > 0:
         prev_text = str(blocks[index - 1].get("text") or "").strip()
-        if "表" in prev_text[:30]:
-            return prev_text
+        cleaned_prev = _clean_html_cell(prev_text)
+        if "表" in cleaned_prev:
+            return cleaned_prev
     return current_heading or None
+
+
+def _extract_table_no(value: str | None) -> str | None:
+    if not value:
+        return None
+    match = re.search(r"表\s*(\d+)", value)
+    if match:
+        return match.group(1)
+    return None
 
 
 def _parse_html_table(html_text: str) -> tuple[list[str], list[list[str]]]:

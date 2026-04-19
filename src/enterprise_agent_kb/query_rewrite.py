@@ -73,6 +73,8 @@ def _detect_query_type(original_query: str, normalized_query: str) -> str:
         return "constraint"
     if re.search(r"(什么是|是什么|定义|怎么定义|如何定义|是怎么定义的|如何理解|怎么理解)", original_query):
         return "definition"
+    if re.search(r"(阻值|电阻|参数值)", original_query):
+        return "section_lookup"
     if re.search(r"(表\s*\d+|表\d+|字段|参数|指标|效率|功率因数|允差)", original_query):
         return "section_lookup"
     if any(token in original_query for token in ("范围", "适用于", "适用范围")):
@@ -93,7 +95,7 @@ def _must_terms(original_query: str, normalized_query: str, query_type: str) -> 
     standard_code = _extract_standard_code(original_query)
     if standard_code:
         terms.append(_normalize_standard_code(standard_code))
-    exact_terms = re.findall(r"[A-Z][A-Z0-9/-]{2,}", original_query)
+    exact_terms = re.findall(r"[A-Z][A-Z0-9/-]{1,}", original_query)
     for term in exact_terms:
         if term not in terms:
             terms.append(term)

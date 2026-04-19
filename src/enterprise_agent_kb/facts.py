@@ -654,6 +654,7 @@ def _knowledge_unit_fact_payloads(
                     "payload": {
                         "title": unit.title,
                         "table_title": unit.table_title,
+                        "table_no": unit.table_no,
                         "headers": unit.headers,
                         "rows": unit.rows[:20] if unit.rows else [],
                     },
@@ -661,6 +662,54 @@ def _knowledge_unit_fact_payloads(
                     "base_confidence": 0.78,
                 }
             )
+            payloads.extend(_table_parameter_fact_payloads(unit))
+    return payloads
+
+
+def _table_parameter_fact_payloads(unit) -> list[dict[str, object]]:
+    headers = list(unit.headers or [])
+    rows = list(unit.rows or [])
+    if not headers or not rows:
+        return []
+
+    normalized_headers = [str(header) for header in headers]
+    if not any(token in " ".join(normalized_headers) for token in ("参数", "符号", "标称值", "单位")):
+        return []
+
+    payloads: list[dict[str, object]] = []
+    for row in rows:
+        if len(row) < 5:
+            continue
+        parameter = str(row[1]).strip() if len(row) > 1 else ""
+        symbol = str(row[2]).strip() if len(row) > 2 else ""
+        unit_name = str(row[3]).strip() if len(row) > 3 else ""
+        nominal = str(row[4]).strip() if len(row) > 4 else ""
+        max_value = str(row[5]).strip() if len(row) > 5 else ""
+        min_value = str(row[6]).strip() if len(row) > 6 else ""
+        state = str(row[7]).strip() if len(row) > 7 else ""
+
+        if not parameter and not symbol:
+            continue
+
+        payloads.append(
+            {
+                "fact_type": "parameter_value",
+                "predicate": "has_parameter_value",
+                "payload": {
+                    "table_title": unit.table_title,
+                    "table_no": unit.table_no,
+                    "parameter": parameter,
+                    "symbol": symbol,
+                    "unit": unit_name,
+                    "nominal_value": nominal,
+                    "max_value": max_value,
+                    "min_value": min_value,
+                    "state": state,
+                },
+                "page_no": unit.page,
+                "base_confidence": 0.76,
+            }
+        )
     return payloads
 
 
