@@ -96,12 +96,20 @@ def answer_query(
         context.get("knowledge_subgraph", {}),
         rewritten.to_dict(),
     )
+    aligned_topic_objects, aligned_topic_entities = _align_topics_to_answer(
+        rewritten.to_dict(),
+        answer_facts,
+        direct_answer="",
+        topic_objects=context.get("topic_objects", []),
+        topic_entities=context.get("topic_entities", []),
+    )
     graph_edges = _filter_graph_edges(
         workspace_root,
         context.get("graph_edges", []),
         answer_facts,
         intent,
         primary_doc_id,
+        context.get("knowledge_subgraph", {}),
     )
     fact_items = [
         {
@@ -143,6 +151,13 @@ def answer_query(
         )
         if topic_evidence_answer:
             direct_answer = topic_evidence_answer
+    aligned_topic_objects, aligned_topic_entities = _align_topics_to_answer(
+        rewritten.to_dict(),
+        answer_facts,
+        direct_answer=direct_answer,
+        topic_objects=context.get("topic_objects", []),
+        topic_entities=context.get("topic_entities", []),
+    )
     confidence_score = compute_confidence_score(
         answer_mode=answer_mode,
         direct_answer=direct_answer,
@@ -163,7 +178,8 @@ def answer_query(
         "supporting_evidence": evidence_items[:2],
         "related_graph_edges": graph_edges[:4],
         "related_wiki_pages": wiki_pages[:3],
-        "topic_objects": context.get("topic_objects", [])[:5],
+        "topic_objects": aligned_topic_objects[:5],
+        "topic_entities": aligned_topic_entities[:5],
         "warnings": warnings,
         "context": context,
     }
@@ -654,6 +670,103 @@ def _build_definition_from_wiki(workspace_root: Path, wiki_pages: list[dict[str,
         if title and definition:
             return f"{title}: {definition}"
     return ""
+
+
+def _align_topics_to_answer(
+    rewritten_payload: dict[str, object],
+    answer_facts: list[dict[str, object]],
+    direct_answer: str,
+    topic_objects: list[dict[str, object]],
+    topic_entities: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    if not topic_objects:
+        return [], []
+
+    query_type = str(rewritten_payload.get("query_type") or "")
+    target_topic = str(rewritten_payload.get("target_topic") or "").strip()
+
+    def score_topic(item: dict[str, object]) -> tuple[float, str]:
+        title = str(item.get("title") or "").strip()
+        entity_id = str(item.get("entity_id") or "").strip()
+        page_type = str(item.get("page_type") or "").strip()
+        score = 0.0
+
+        if target_topic and title and target_topic in title:
+            score += 5.0
+        if direct_answer and title and title in direct_answer:
+            score += 4.0
+
+        if query_type == "definition":
+            if page_type == "term":
+                score += 2.0
+            if direct_answer and title and title.split(" vehicle", 1)[0] in direct_answer:
+                score += 4.0
+        elif query_type == "parameter_lookup":
+            fact_titles = []
+            for fact in answer_facts:
+                payload = fact.get("object_value")
+                if isinstance(payload, dict):
+                    for key in ("table_title", "source_caption", "title"):
+                        value = str(payload.get(key) or "").strip()
+                        if value:
+                            fact_titles.append(value)
+            if any(title and title in fact_title for fact_title in fact_titles):
+                score += 6.0
+            if page_type == "parameter_group":
+                score += 1.5
+        elif query_type == "timing_lookup":
+            fact_titles = []
+            for fact in answer_facts:
+                payload = fact.get("object_value")
+                if isinstance(payload, dict):
+                    for key in ("table_title", "title", "process_name"):
+                        value = str(payload.get(key) or "").strip()
+                        if value:
+                            fact_titles.append(value)
+            if any(title and title in fact_title for fact_title in fact_titles):
+                score += 6.0
+            if page_type == "process":
+                score += 1.5
+        elif query_type == "comparison":
+            if page_type == "comparison":
+                score += 2.0
+        elif query_type == "constraint":
+            if page_type == "constraint":
+                score += 2.0
+
+        if entity_id and any(str(entity.get("entity_id") or "") == entity_id for entity in topic_entities):
+            score += 1.0
+        return (score, title)
+
+    ranked_topics = sorted(topic_objects, key=score_topic, reverse=True)
+    if not ranked_topics:
+        return topic_objects[:5], topic_entities[:5]
+
+    top_topics = [item for item in ranked_topics if score_topic(item)[0] > 0]
+    if not top_topics:
+        top_topics = ranked_topics[:5]
+
+    chosen_entity_ids = {
+        str(item.get("entity_id") or "").strip()
+        for item in top_topics
+        if str(item.get("entity_id") or "").strip()
+    }
+    aligned_entities = [
+        entity for entity in topic_entities
+        if str(entity.get("entity_id") or "").strip() in chosen_entity_ids
+    ]
+    if not aligned_entities:
+        aligned_entities = topic_entities[:5]
+
+    dedup_topics: list[dict[str, object]] = []
+    seen_pages: set[str] = set()
+    for item in top_topics:
+        page_id = str(item.get("page_id") or "")
+        if page_id and page_id not in seen_pages:
+            seen_pages.add(page_id)
+            dedup_topics.append(item)
+
+    return dedup_topics[:5], aligned_entities[:5]
 
 
 def _build_constraint_from_topic_evidence(
@@ -1153,6 +1266,7 @@ def _apply_subgraph_fact_signals(
 
     seeded_fact_ids = {str(item) for item in knowledge_subgraph.get("seed_fact_ids", []) if str(item).strip()}
     seeded_entity_ids = {str(item) for item in knowledge_subgraph.get("seed_entity_ids", []) if str(item).strip()}
+    topic_entity_ids = {str(item) for item in knowledge_subgraph.get("topic_entity_ids", []) if str(item).strip()}
     wiki_page_types = {
         str(item).strip().lower()
         for item in knowledge_subgraph.get("wiki_page_types", [])
@@ -1169,6 +1283,10 @@ def _apply_subgraph_fact_signals(
             bonus += 1.5
         if str(cloned.get("object_entity_id") or "") in seeded_entity_ids:
             bonus += 1.5
+        if str(cloned.get("subject_entity_id") or "") in topic_entity_ids:
+            bonus += 2.4
+        if str(cloned.get("object_entity_id") or "") in topic_entity_ids:
+            bonus += 2.4
         if cloned.get("_source_from_wiki"):
             bonus += 1.2
 
@@ -1220,6 +1338,7 @@ def _prioritize_subgraph_facts(
         return list(facts)
 
     seeded_fact_ids = {str(item) for item in knowledge_subgraph.get("seed_fact_ids", []) if str(item).strip()}
+    topic_entity_ids = {str(item) for item in knowledge_subgraph.get("topic_entity_ids", []) if str(item).strip()}
 
     def score(item: dict[str, object]) -> tuple[float, float]:
         confidence = float(item.get("confidence") or 0.0)
@@ -1228,6 +1347,10 @@ def _prioritize_subgraph_facts(
             bonus += 1.5
         if item.get("_source_from_wiki"):
             bonus += 1.0
+        if str(item.get("subject_entity_id") or "") in topic_entity_ids:
+            bonus += 1.4
+        if str(item.get("object_entity_id") or "") in topic_entity_ids:
+            bonus += 1.4
         return (bonus + confidence, confidence)
 
     return sorted(facts, key=score, reverse=True)
@@ -1472,6 +1595,7 @@ def _filter_graph_edges(
     facts: list[dict[str, object]],
     intent: str,
     doc_id: str | None,
+    knowledge_subgraph: dict[str, object] | None = None,
 ) -> list[dict[str, object]]:
     entity_ids: set[str] = set()
     for item in facts[:8]:
@@ -1479,6 +1603,12 @@ def _filter_graph_edges(
             entity_ids.add(item["subject_entity_id"])
         if item.get("object_entity_id"):
             entity_ids.add(item["object_entity_id"])
+    topic_entity_ids = {
+        str(item)
+        for item in (knowledge_subgraph or {}).get("topic_entity_ids", [])
+        if str(item).strip()
+    }
+    entity_ids |= topic_entity_ids
 
     filtered = [
         edge

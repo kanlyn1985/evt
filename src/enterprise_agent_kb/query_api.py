@@ -136,6 +136,15 @@ def build_query_context(
                 entity_ids.add(item["entity_id"])
 
         topic_objects = _resolve_topic_objects(rewritten, wiki_items)
+        topic_objects = _hydrate_topic_object_entities(connection, topic_objects)
+        topic_entity_ids = {
+            str(item.get("entity_id") or "").strip()
+            for item in topic_objects
+            if str(item.get("entity_id") or "").strip()
+        }
+        for item in topic_objects:
+            if item.get("entity_id"):
+                entity_ids.add(item["entity_id"])
 
         fact_items = _augment_facts_from_wiki(connection, fact_items, wiki_items, doc_ids)
         for item in fact_items:
@@ -158,9 +167,15 @@ def build_query_context(
             ).fetchall()
             entity_items = [dict(row) for row in rows]
 
+        topic_entity_items = [
+            item for item in entity_items
+            if str(item.get("entity_id") or "") in topic_entity_ids
+        ]
+
         edge_items: list[dict[str, object]] = []
-        if entity_ids:
-            placeholders = ",".join("?" for _ in entity_ids)
+        edge_seed_ids = topic_entity_ids or entity_ids
+        if edge_seed_ids:
+            placeholders = ",".join("?" for _ in edge_seed_ids)
             rows = connection.execute(
                 f"""
                 SELECT edge_id, src_entity_id, relation, dst_entity_id, version_scope, confidence
@@ -169,7 +184,7 @@ def build_query_context(
                 ORDER BY confidence DESC, edge_id ASC
                 LIMIT ?
                 """,
-                [*entity_ids, *entity_ids, limit * 3],
+                [*edge_seed_ids, *edge_seed_ids, limit * 3],
             ).fetchall()
             edge_items = [dict(row) for row in rows]
 
@@ -184,6 +199,7 @@ def build_query_context(
                 if str(item.get("page_type") or "").strip()
             }),
             "topic_object_ids": [item["page_id"] for item in topic_objects[:8] if item.get("page_id")],
+            "topic_entity_ids": sorted(topic_entity_ids)[:12],
             "fact_count": len(fact_items),
             "edge_count": len(edge_items),
             "wiki_count": len(wiki_items),
@@ -227,6 +243,7 @@ def build_query_context(
             "evidence": evidence_items,
             "facts": fact_items,
             "entities": entity_items,
+            "topic_entities": topic_entity_items,
             "graph_edges": edge_items,
             "wiki_pages": wiki_items,
             "topic_objects": topic_objects,
@@ -585,3 +602,38 @@ def _resolve_topic_objects(rewritten, wiki_items: list[dict[str, object]]) -> li
             seen.add(page_id)
             topic_objects.append(item)
     return topic_objects[:8]
+
+
+def _hydrate_topic_object_entities(connection, topic_objects: list[dict[str, object]]) -> list[dict[str, object]]:
+    hydrated: list[dict[str, object]] = []
+    for item in topic_objects:
+        cloned = dict(item)
+        if not cloned.get("entity_id"):
+            title = str(cloned.get("title") or "").strip()
+            page_type = str(cloned.get("page_type") or "").strip()
+            if title:
+                entity_type = None
+                if page_type == "constraint":
+                    entity_type = "constraint_topic"
+                elif page_type == "comparison":
+                    entity_type = "comparison_topic"
+                elif page_type == "process":
+                    entity_type = "process"
+                elif page_type == "parameter_group":
+                    entity_type = "parameter_group"
+                elif page_type in {"term", "concept"}:
+                    entity_type = "term"
+                if entity_type:
+                    row = connection.execute(
+                        """
+                        SELECT entity_id
+                        FROM entities
+                        WHERE entity_type = ? AND (canonical_name = ? OR canonical_name LIKE ?)
+                        LIMIT 1
+                        """,
+                        (entity_type, title, f"%{title}%"),
+                    ).fetchone()
+                    if row:
+                        cloned["entity_id"] = row["entity_id"]
+        hydrated.append(cloned)
+    return hydrated

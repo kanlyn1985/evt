@@ -238,6 +238,41 @@ def build_entities_for_document(workspace_root: Path, doc_id: str) -> EntitiesBu
                     )
                     entity_ids_for_export[entity_id] = (table_title, "parameter_group", "Parameter group derived from table", confidence)
 
+            elif row["fact_type"] in {"requirement", "threshold"}:
+                topic = str(payload.get("topic") or payload.get("subject") or "").strip()
+                scope_type = str(payload.get("scope_type") or "").strip()
+                if topic and scope_type not in {"index", "preface", "overview"}:
+                    entity_id = _ensure_entity(
+                        connection,
+                        canonical_name=topic,
+                        entity_type="constraint_topic",
+                        description=f"Constraint topic {topic}",
+                        confidence=confidence,
+                        now=now,
+                    )
+                    connection.execute(
+                        "UPDATE facts SET object_entity_id = ? WHERE fact_id = ?",
+                        (entity_id, fact_id),
+                    )
+                    entity_ids_for_export[entity_id] = (topic, "constraint_topic", f"Constraint topic {topic}", confidence)
+
+            elif row["fact_type"] == "comparison_relation":
+                subject = str(payload.get("subject") or "").strip()
+                if subject:
+                    entity_id = _ensure_entity(
+                        connection,
+                        canonical_name=subject,
+                        entity_type="comparison_topic",
+                        description=f"Comparison topic {subject}",
+                        confidence=confidence,
+                        now=now,
+                    )
+                    connection.execute(
+                        "UPDATE facts SET object_entity_id = ? WHERE fact_id = ?",
+                        (entity_id, fact_id),
+                    )
+                    entity_ids_for_export[entity_id] = (subject, "comparison_topic", f"Comparison topic {subject}", confidence)
+
         export_items = [
             {
                 "entity_id": entity_id,

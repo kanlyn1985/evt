@@ -47,6 +47,52 @@ def _load_payload(value: str) -> dict[str, object]:
         return {}
 
 
+def _find_entity_id_by_name(connection, canonical_name: str, entity_type: str) -> str | None:
+    row = connection.execute(
+        """
+        SELECT entity_id
+        FROM entities
+        WHERE canonical_name = ? AND entity_type = ?
+        LIMIT 1
+        """,
+        (canonical_name, entity_type),
+    ).fetchone()
+    if row:
+        return row["entity_id"]
+
+    normalized = _clean_heading_topic(canonical_name)
+    if normalized and normalized != canonical_name:
+        row = connection.execute(
+            """
+            SELECT entity_id
+            FROM entities
+            WHERE canonical_name = ? AND entity_type = ?
+            LIMIT 1
+            """,
+            (normalized, entity_type),
+        ).fetchone()
+        if row:
+            return row["entity_id"]
+
+    rows = connection.execute(
+        """
+        SELECT entity_id, canonical_name
+        FROM entities
+        WHERE entity_type = ?
+        """,
+        (entity_type,),
+    ).fetchall()
+    for candidate in rows:
+        candidate_name = str(candidate["canonical_name"] or "").strip()
+        if normalized and candidate_name == normalized:
+            return candidate["entity_id"]
+        if normalized and normalized in candidate_name:
+            return candidate["entity_id"]
+        if candidate_name and candidate_name in canonical_name:
+            return candidate["entity_id"]
+    return None
+
+
 def _term_is_publishable(name: str, description: str | None) -> bool:
     if not name or len(name) > 50:
         return False
@@ -377,6 +423,7 @@ def _build_extra_wiki_pages(connection, doc_id: str, paths: AppPaths, now: str) 
                 page_type = excluded.page_type,
                 title = excluded.title,
                 slug = excluded.slug,
+                entity_id = excluded.entity_id,
                 source_fact_ids_json = excluded.source_fact_ids_json,
                 source_doc_ids_json = excluded.source_doc_ids_json,
                 trust_status = excluded.trust_status,
@@ -431,6 +478,7 @@ def _build_extra_wiki_pages(connection, doc_id: str, paths: AppPaths, now: str) 
                 page_type = excluded.page_type,
                 title = excluded.title,
                 slug = excluded.slug,
+                entity_id = excluded.entity_id,
                 source_fact_ids_json = excluded.source_fact_ids_json,
                 source_doc_ids_json = excluded.source_doc_ids_json,
                 trust_status = excluded.trust_status,
@@ -474,6 +522,7 @@ def _build_extra_wiki_pages(connection, doc_id: str, paths: AppPaths, now: str) 
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(_build_constraint_wiki_page(title, grouped_rows), encoding="utf-8")
         export_paths.append(file_path)
+        entity_id = _find_entity_id_by_name(connection, title, "constraint_topic")
         connection.execute(
             """
             INSERT INTO wiki_pages (
@@ -485,6 +534,7 @@ def _build_extra_wiki_pages(connection, doc_id: str, paths: AppPaths, now: str) 
                 page_type = excluded.page_type,
                 title = excluded.title,
                 slug = excluded.slug,
+                entity_id = excluded.entity_id,
                 source_fact_ids_json = excluded.source_fact_ids_json,
                 source_doc_ids_json = excluded.source_doc_ids_json,
                 trust_status = excluded.trust_status,
@@ -496,7 +546,7 @@ def _build_extra_wiki_pages(connection, doc_id: str, paths: AppPaths, now: str) 
                 "constraint",
                 title,
                 slug,
-                None,
+                entity_id,
                 json.dumps([row["fact_id"] for row in grouped_rows], ensure_ascii=False),
                 json.dumps([doc_id], ensure_ascii=False),
                 "draft",
@@ -530,6 +580,7 @@ def _build_extra_wiki_pages(connection, doc_id: str, paths: AppPaths, now: str) 
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(f"# {topic_title}\n\n## 主题\n- 来自章节标题：{raw_title}\n", encoding="utf-8")
         export_paths.append(file_path)
+        entity_id = _find_entity_id_by_name(connection, topic_title, "constraint_topic")
         connection.execute(
             """
             INSERT INTO wiki_pages (
@@ -541,6 +592,7 @@ def _build_extra_wiki_pages(connection, doc_id: str, paths: AppPaths, now: str) 
                 page_type = excluded.page_type,
                 title = excluded.title,
                 slug = excluded.slug,
+                entity_id = excluded.entity_id,
                 source_fact_ids_json = excluded.source_fact_ids_json,
                 source_doc_ids_json = excluded.source_doc_ids_json,
                 trust_status = excluded.trust_status,
@@ -552,7 +604,7 @@ def _build_extra_wiki_pages(connection, doc_id: str, paths: AppPaths, now: str) 
                 "constraint",
                 topic_title,
                 slug,
-                None,
+                entity_id,
                 json.dumps([row["fact_id"]], ensure_ascii=False),
                 json.dumps([doc_id], ensure_ascii=False),
                 "draft",
@@ -584,6 +636,7 @@ def _build_extra_wiki_pages(connection, doc_id: str, paths: AppPaths, now: str) 
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(_build_comparison_wiki_page(title, grouped_rows), encoding="utf-8")
         export_paths.append(file_path)
+        entity_id = _find_entity_id_by_name(connection, title, "comparison_topic")
         connection.execute(
             """
             INSERT INTO wiki_pages (
@@ -606,7 +659,7 @@ def _build_extra_wiki_pages(connection, doc_id: str, paths: AppPaths, now: str) 
                 "comparison",
                 title,
                 slug,
-                None,
+                entity_id,
                 json.dumps([row["fact_id"] for row in grouped_rows], ensure_ascii=False),
                 json.dumps([doc_id], ensure_ascii=False),
                 "draft",
