@@ -163,6 +163,7 @@ def answer_query(
         "supporting_evidence": evidence_items[:2],
         "related_graph_edges": graph_edges[:4],
         "related_wiki_pages": wiki_pages[:3],
+        "topic_objects": context.get("topic_objects", [])[:5],
         "warnings": warnings,
         "context": context,
     }
@@ -260,6 +261,34 @@ def _restrict_context_to_doc(workspace_root: Path, context: dict[str, object], d
         item for item in context.get("graph_edges", [])
         if item.get("version_scope") == doc_id
     ]
+    filtered["topic_objects"] = [
+        item for item in context.get("topic_objects", [])
+        if item.get("page_id") in {wiki.get("page_id") for wiki in filtered["wiki_pages"]}
+        or str(item.get("page_id") or "").startswith(f"WCONTOP-{doc_id}-")
+        or str(item.get("page_id") or "").startswith(f"WCON-{doc_id}-")
+        or str(item.get("page_id") or "").startswith(f"WCMP-{doc_id}-")
+        or str(item.get("page_id") or "").startswith(f"WPROC-{doc_id}-")
+        or str(item.get("page_id") or "").startswith(f"WPAR-{doc_id}-")
+    ]
+    filtered["knowledge_subgraph"] = {
+        **dict(context.get("knowledge_subgraph") or {}),
+        "seed_wiki_page_ids": [item.get("page_id") for item in filtered["wiki_pages"][:8] if item.get("page_id")],
+        "seed_entity_ids": sorted({
+            *(item.get("entity_id") for item in filtered["entities"] if item.get("entity_id")),
+        })[:20],
+        "seed_fact_ids": [item.get("fact_id") for item in filtered["facts"][:80] if item.get("fact_id")],
+        "seed_edge_ids": [item.get("edge_id") for item in filtered["graph_edges"][:80] if item.get("edge_id")],
+        "wiki_page_types": sorted({
+            str(item.get("page_type") or "").strip()
+            for item in filtered["wiki_pages"]
+            if str(item.get("page_type") or "").strip()
+        }),
+        "topic_object_ids": [item.get("page_id") for item in filtered["topic_objects"][:8] if item.get("page_id")],
+        "fact_count": len(filtered["facts"]),
+        "edge_count": len(filtered["graph_edges"]),
+        "wiki_count": len(filtered["wiki_pages"]),
+        "topic_count": len(filtered["topic_objects"]),
+    }
     filtered["hit_count"] = len(filtered["hits"])
     return filtered
 
