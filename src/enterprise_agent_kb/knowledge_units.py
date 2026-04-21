@@ -16,6 +16,8 @@ class KnowledgeUnit:
     section: str | None
     page: int
     subject: str | None = None
+    topic: str | None = None
+    scope_type: str | None = None
     condition: str | None = None
     threshold: str | None = None
     table_title: str | None = None
@@ -72,11 +74,14 @@ def extract_knowledge_units(cleaned_doc_ir_path: Path) -> KnowledgeUnitBundle:
                 index += 1
                 continue
 
-            if block_type == "table":
+            if block_type == "table" or _looks_like_markdown_table(text):
                 title = current_heading or f"page_{page_no}_table"
                 table_title = _infer_table_title(blocks, index, current_heading)
                 table_no = _extract_table_no(table_title or title)
-                headers, rows = _parse_html_table(text)
+                if _looks_like_markdown_table(text):
+                    headers, rows = _parse_markdown_table(text)
+                else:
+                    headers, rows = _parse_html_table(text)
                 units.append(
                     KnowledgeUnit(
                         id=f"{doc_id}_table_{page_no}_{index+1}",
@@ -97,6 +102,8 @@ def extract_knowledge_units(cleaned_doc_ir_path: Path) -> KnowledgeUnitBundle:
             if _looks_like_requirement(text):
                 title = current_heading or f"page_{page_no}_requirement"
                 subject, condition, threshold = _parse_requirement_fields(title, text)
+                topic = _infer_requirement_topic(title, subject, current_heading)
+                scope_type = _infer_requirement_scope_type(title, text, current_section)
                 units.append(
                     KnowledgeUnit(
                         id=f"{doc_id}_requirement_{page_no}_{index+1}",
@@ -106,6 +113,8 @@ def extract_knowledge_units(cleaned_doc_ir_path: Path) -> KnowledgeUnitBundle:
                         section=current_section,
                         page=page_no,
                         subject=subject,
+                        topic=topic,
+                        scope_type=scope_type,
                         condition=condition,
                         threshold=threshold,
                     )
@@ -207,6 +216,36 @@ def _parse_requirement_fields(title: str, text: str) -> tuple[str | None, str | 
     condition = _extract_requirement_condition(text)
     threshold = _extract_requirement_threshold(text)
     return subject, condition, threshold
+
+
+def _infer_requirement_topic(title: str, subject: str | None, current_heading: str) -> str | None:
+    candidates = [subject, title, current_heading]
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if not text:
+            continue
+        text = re.sub(r"^\d+(?:\.\d+){0,8}\s*", "", text)
+        text = text.replace("（规范性）", "").replace("(规范性)", "")
+        text = text.replace("（资料性）", "").replace("(资料性)", "")
+        text = text.split("。", 1)[0].split("：", 1)[0].strip()
+        if text:
+            return text[:120]
+    return None
+
+
+def _infer_requirement_scope_type(title: str, text: str, current_section: str | None) -> str:
+    heading = f"{title} {text[:120]}"
+    if any(token in heading for token in ("目次", "目 次")):
+        return "index"
+    if any(token in heading for token in ("前言", "前    言", "引言")):
+        return "preface"
+    if re.search(r"^\s*1\s*范围", title) or "适用于" in text or "本文件规定了" in text:
+        return "overview"
+    if current_section and any(current_section.startswith(prefix) for prefix in ("A", "B", "C", "D", "E", "F", "G", "H", "I", "J")):
+        return "appendix_rule"
+    if any(token in heading for token in ("要求", "应", "不应", "不得", "保护", "锁止", "急停", "停机")):
+        return "normative_requirement"
+    return "general_requirement"
 
 
 def _extract_requirement_subject(title: str, text: str) -> str | None:
@@ -311,10 +350,50 @@ def _parse_html_table(html_text: str) -> tuple[list[str], list[list[str]]]:
     return headers, data_rows
 
 
+def _looks_like_markdown_table(text: str) -> bool:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return False
+    if not lines[0].startswith("|"):
+        return False
+    separator_line = next((line for line in lines[1:3] if line.startswith("|")), "")
+    return bool(re.search(r"\|\s*:?-{3,}", separator_line))
+
+
+def _parse_markdown_table(markdown_text: str) -> tuple[list[str], list[list[str]]]:
+    lines = [line.strip() for line in markdown_text.splitlines() if line.strip()]
+    table_lines = [line for line in lines if line.startswith("|")]
+    if len(table_lines) < 2:
+        return [], []
+
+    def split_row(row: str) -> list[str]:
+        cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+        return [_clean_markdown_cell(cell) for cell in cells]
+
+    header_row = split_row(table_lines[0])
+    data_rows: list[list[str]] = []
+    for row in table_lines[1:]:
+        if re.fullmatch(r"\|?[\s:\-|]+\|?", row):
+            continue
+        parsed = split_row(row)
+        if parsed:
+            data_rows.append(parsed)
+    return header_row, data_rows
+
+
 def _clean_html_cell(value: str) -> str:
     text = re.sub(r"<[^>]+>", " ", value)
     text = unescape(text)
     text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _clean_markdown_cell(value: str) -> str:
+    text = value.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+    text = re.sub(r"\$([^$]+)\$", r"\1", text)
+    text = text.replace("**", "").replace("__", "")
+    text = text.replace("\\|", "|")
+    text = _clean_html_cell(text)
     return text
 
 

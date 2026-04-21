@@ -24,3 +24,9 @@ def test_rewrite_scope_query() -> None:
 def test_rewrite_constraint_query() -> None:
     rewritten = rewrite_query("逆变器必须满足哪些要求？")
     assert rewritten.query_type == "constraint"
+
+
+def test_rewrite_parameter_query() -> None:
+    rewritten = rewrite_query("CC阻值有哪些")
+    assert rewritten.query_type == "parameter_lookup"
+    assert "CC" in rewritten.must_terms

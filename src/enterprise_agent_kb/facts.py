@@ -625,6 +625,8 @@ def _knowledge_unit_fact_payloads(
                         "title": unit.title,
                         "content": unit.content,
                         "subject": unit.subject,
+                        "topic": unit.topic,
+                        "scope_type": unit.scope_type,
                         "condition": unit.condition,
                         "threshold": unit.threshold,
                     },
@@ -640,6 +642,8 @@ def _knowledge_unit_fact_payloads(
                         "payload": {
                             "title": unit.title,
                             "subject": unit.subject,
+                            "topic": unit.topic,
+                            "scope_type": unit.scope_type,
                             "value": unit.threshold,
                         },
                         "page_no": unit.page,
@@ -663,6 +667,22 @@ def _knowledge_unit_fact_payloads(
                 }
             )
             payloads.extend(_table_parameter_fact_payloads(unit))
+            payloads.extend(_timing_fact_payloads(unit))
+        elif unit.type == "procedure":
+            payloads.append(
+                {
+                    "fact_type": "process_fact",
+                    "predicate": "describes_process",
+                    "payload": {
+                        "title": unit.title,
+                        "process_name": unit.title,
+                        "step_text": unit.content,
+                        "section": unit.section,
+                    },
+                    "page_no": unit.page,
+                    "base_confidence": 0.79,
+                }
+            )
     return payloads
 
 
@@ -672,23 +692,42 @@ def _table_parameter_fact_payloads(unit) -> list[dict[str, object]]:
     if not headers or not rows:
         return []
 
-    normalized_headers = [str(header) for header in headers]
-    if not any(token in " ".join(normalized_headers) for token in ("参数", "符号", "标称值", "单位")):
+    normalized_headers = [_normalize_header_name(str(header)) for header in headers]
+    header_blob = " ".join(normalized_headers)
+    if not any(token in header_blob for token in ("参数", "符号", "标称值", "单位", "最大值", "最小值", "电路版本")):
         return []
 
+    column_map = {name: idx for idx, name in enumerate(normalized_headers)}
+    object_idx = column_map.get("对象")
+    parameter_idx = column_map.get("参数", 0)
+    symbol_idx = column_map.get("符号", 1 if len(headers) > 1 else 0)
+    unit_idx = column_map.get("单位")
+    nominal_idx = column_map.get("标称值")
+    max_idx = column_map.get("最大值")
+    min_idx = column_map.get("最小值")
+    state_idx = column_map.get("状态")
+    if state_idx is None:
+        state_idx = column_map.get("电路版本")
+
     payloads: list[dict[str, object]] = []
+    last_object = ""
     for row in rows:
-        if len(row) < 5:
+        if len(row) < 3:
             continue
-        parameter = str(row[1]).strip() if len(row) > 1 else ""
-        symbol = str(row[2]).strip() if len(row) > 2 else ""
-        unit_name = str(row[3]).strip() if len(row) > 3 else ""
-        nominal = str(row[4]).strip() if len(row) > 4 else ""
-        max_value = str(row[5]).strip() if len(row) > 5 else ""
-        min_value = str(row[6]).strip() if len(row) > 6 else ""
-        state = str(row[7]).strip() if len(row) > 7 else ""
+        object_name = _row_value(row, object_idx)
+        if object_name:
+            last_object = object_name
+        parameter = _row_value(row, parameter_idx)
+        symbol = _row_value(row, symbol_idx)
+        unit_name = _normalize_unit(_row_value(row, unit_idx))
+        nominal = _row_value(row, nominal_idx)
+        max_value = _row_value(row, max_idx)
+        min_value = _row_value(row, min_idx)
+        state = _row_value(row, state_idx)
 
         if not parameter and not symbol:
+            continue
+        if parameter in {"最小值", "标称值", "最大值"}:
             continue
 
         payloads.append(
@@ -698,6 +737,7 @@ def _table_parameter_fact_payloads(unit) -> list[dict[str, object]]:
                 "payload": {
                     "table_title": unit.table_title,
                     "table_no": unit.table_no,
+                    "object": object_name or last_object,
                     "parameter": parameter,
                     "symbol": symbol,
                     "unit": unit_name,
@@ -705,12 +745,205 @@ def _table_parameter_fact_payloads(unit) -> list[dict[str, object]]:
                     "max_value": max_value,
                     "min_value": min_value,
                     "state": state,
+                    **_parameter_scope_fields(
+                        title=unit.title,
+                        table_title=unit.table_title,
+                        object_name=object_name or last_object,
+                        parameter=parameter,
+                        symbol=symbol,
+                        state=state,
+                    ),
                 },
                 "page_no": unit.page,
                 "base_confidence": 0.76,
             }
         )
     return payloads
+
+
+def _normalize_header_name(value: str) -> str:
+    text = re.sub(r"\s+", "", value)
+    text = re.sub(r"\$[^$]+\$", "", text)
+    text = text.replace("^a", "").replace("^b", "").replace("^c", "")
+    text = re.sub(r"[ᵃᵇᶜᵈᵉᶠᵍ]", "", text)
+    if "参数" in text:
+        return "参数"
+    if "时序" in text:
+        return "时序"
+    if "控制时序说明" in text:
+        return "控制时序说明"
+    if "符号" in text:
+        return "符号"
+    if "单位" in text:
+        return "单位"
+    if "标称值" in text:
+        return "标称值"
+    if "最大值" in text:
+        return "最大值"
+    if "最小值" in text:
+        return "最小值"
+    if "电路版本" in text:
+        return "电路版本"
+    if "状态" in text:
+        return "状态"
+    if "对象" in text:
+        return "对象"
+    return text
+
+
+def _row_value(row: list[str], index: int | None) -> str:
+    if index is None or index >= len(row) or index < 0:
+        return ""
+    return str(row[index]).strip()
+
+
+def _normalize_unit(value: str) -> str:
+    unit = value.replace("\\Omega", "Ω").replace("Omega", "Ω").replace("ohm", "Ω")
+    unit = unit.replace("\\mu", "μ")
+    unit = re.sub(r"\s+", "", unit)
+    return unit
+
+
+def _timing_fact_payloads(unit) -> list[dict[str, object]]:
+    headers = [str(item or "") for item in (unit.headers or [])]
+    rows = list(unit.rows or [])
+    if not headers or not rows:
+        return []
+
+    header_blob = " ".join(headers)
+    title_blob = f"{unit.title or ''} {unit.table_title or ''}"
+    if not any(token in header_blob + title_blob for token in ("时序", "状态", "条件", "时间", "控制时序")):
+        return []
+
+    payloads: list[dict[str, object]] = []
+    normalized_headers = [_normalize_header_name(header) for header in headers]
+    column_map = {name: idx for idx, name in enumerate(normalized_headers)}
+
+    sequence_idx = column_map.get("时序", 0)
+    state_idx = column_map.get("状态")
+    condition_idx = column_map.get("条件")
+    time_idx = column_map.get("时间")
+    action_idx = column_map.get("控制时序说明")
+    if action_idx is None and len(headers) == 2:
+        action_idx = 1
+
+    for row in rows:
+        if not isinstance(row, list) or not row:
+            continue
+        sequence = _row_value(row, sequence_idx)
+        state = _row_value(row, state_idx)
+        condition = _row_value(row, condition_idx)
+        time_value = _row_value(row, time_idx)
+        action = _row_value(row, action_idx)
+        combined = " ".join(part for part in [sequence, state, condition, action, time_value] if part).strip()
+        if not combined:
+            continue
+
+        payloads.append(
+            {
+                "fact_type": "process_fact",
+                "predicate": "describes_process",
+                "payload": {
+                    "title": unit.title,
+                    "table_title": unit.table_title,
+                    "section": unit.section,
+                    "sequence": sequence,
+                    "state": state,
+                    "condition": condition,
+                    "action": action or combined,
+                    "time_constraint": time_value,
+                },
+                "page_no": unit.page,
+                "base_confidence": 0.8,
+            }
+        )
+
+        if state or condition or time_value:
+            payloads.append(
+                {
+                    "fact_type": "transition_fact",
+                    "predicate": "has_transition",
+                    "payload": {
+                        "title": unit.title,
+                        "table_title": unit.table_title,
+                        "section": unit.section,
+                        "sequence": sequence,
+                        "state": state,
+                        "condition": condition,
+                        "action": action,
+                        "time_constraint": time_value,
+                    },
+                    "page_no": unit.page,
+                    "base_confidence": 0.78,
+                }
+            )
+    return payloads
+
+
+def _parameter_scope_fields(
+    *,
+    title: str | None,
+    table_title: str | None,
+    object_name: str,
+    parameter: str,
+    symbol: str,
+    state: str,
+) -> dict[str, object]:
+    table_haystack = " ".join(part for part in [title or "", table_title or ""] if part).upper()
+    row_haystack = " ".join(part for part in [object_name, parameter, symbol, state] if part).upper()
+    tags: list[str] = []
+    row_tags: list[str] = []
+    table_tags: list[str] = []
+
+    def add(tag: str, *, row_only: bool = False, table_only: bool = False) -> None:
+        if tag not in tags:
+            tags.append(tag)
+        if row_only and tag not in row_tags:
+            row_tags.append(tag)
+        if table_only and tag not in table_tags:
+            table_tags.append(tag)
+
+    for token in ("CC1", "CC2", "CP", "R1", "R2", "R3", "R4", "R4C", "R4C'", "RV", "RV'"):
+        if token in row_haystack:
+            add(token, row_only=True)
+        elif token in table_haystack:
+            add(token, table_only=True)
+    for token in ("控制导引", "检测点1", "检测点2", "检测点3", "车辆插头", "车辆插座", "充电机", "电动汽车"):
+        if token in row_haystack:
+            add(token, row_only=True)
+        elif token in table_haystack:
+            add(token, table_only=True)
+
+    loop_scope = "general"
+    if "CC1" in row_tags or "CC2" in row_tags:
+        loop_scope = "cc"
+    elif "CC1" in tags or "CC2" in tags:
+        loop_scope = "cc"
+    elif "CP" in row_tags or "CP" in tags:
+        loop_scope = "cp"
+
+    detection_points: list[str] = []
+    for token in ("检测点1", "检测点2", "检测点3"):
+        if token in row_tags or token in table_tags:
+            detection_points.append(token)
+
+    interface_scope: list[str] = []
+    for token in ("车辆插头", "车辆插座", "充电机", "电动汽车"):
+        if token in row_tags or token in table_tags:
+            interface_scope.append(token)
+
+    scope_confidence = "row" if row_tags else "table" if table_tags else "none"
+
+    return {
+        "focus_tags": tags,
+        "row_focus_tags": row_tags,
+        "table_focus_tags": table_tags,
+        "loop_scope": loop_scope,
+        "detection_points": detection_points,
+        "interface_scope": interface_scope,
+        "scope_confidence": scope_confidence,
+        "source_caption": (table_title or title or "").strip(),
+    }
 
 
 def build_facts_for_document(workspace_root: Path, doc_id: str) -> FactsBuildResult:

@@ -81,6 +81,9 @@ def build_evidence_for_document(workspace_root: Path, doc_id: str) -> EvidenceBu
         skipped_block_count = 0
 
         for row in rows:
+            if str(row["block_type"]) == "structure_markdown":
+                skipped_block_count += 1
+                continue
             text = (row["text_content"] or "").strip()
             allow_high_risk_metadata = _looks_like_cover_metadata(
                 int(row["page_no"]),

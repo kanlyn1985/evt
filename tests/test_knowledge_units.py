@@ -6,9 +6,9 @@ from enterprise_agent_kb.knowledge_units import extract_knowledge_units
 
 
 def test_extract_knowledge_units_from_cleaned_doc_ir() -> None:
-    bundle = extract_knowledge_units(Path("knowledge_base/normalized/DOC-000007.cleaned_doc_ir.json"))
+    bundle = extract_knowledge_units(Path("knowledge_base/normalized/DOC-000006.cleaned_doc_ir.json"))
 
-    assert bundle.doc_id == "DOC-000007"
+    assert bundle.doc_id == "DOC-000006"
     assert bundle.unit_count > 0
     assert any(unit.type == "definition" for unit in bundle.units)
     assert any(unit.type == "requirement" for unit in bundle.units)

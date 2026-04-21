@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -27,7 +28,16 @@ def _slugify(value: str) -> str:
     value = re.sub(r"[^\w\u4e00-\u9fff\- ]+", "-", value)
     value = re.sub(r"[\s_]+", "-", value)
     value = re.sub(r"-{2,}", "-", value).strip("-")
+    value = value[:96].strip("-")
     return value or "page"
+
+
+def _slugify_with_hash(value: str) -> str:
+    base = _slugify(value)
+    digest = hashlib.md5(value.encode("utf-8")).hexdigest()[:8]
+    if len(base) > 84:
+        base = base[:84].strip("-")
+    return f"{base}-{digest}".strip("-")
 
 
 def _load_payload(value: str) -> dict[str, object]:
@@ -129,6 +139,93 @@ def _build_term_page(entity: sqlite3.Row, facts: list[sqlite3.Row]) -> str:
     return "\n".join(lines)
 
 
+def _build_process_wiki_page(title: str, facts: list[sqlite3.Row]) -> str:
+    lines = [f"# {title}", "", "## 过程概览"]
+    rendered: list[str] = []
+    for row in facts[:8]:
+        payload = _load_payload(row["object_value"])
+        action = str(payload.get("action") or payload.get("step_text") or "").strip()
+        state = str(payload.get("state") or "").strip()
+        condition = str(payload.get("condition") or "").strip()
+        time_constraint = str(payload.get("time_constraint") or "").strip()
+        piece = " / ".join(part for part in [state, condition, action, time_constraint] if part)
+        if piece and piece not in rendered:
+            rendered.append(piece)
+    lines.extend(f"- {item}" for item in rendered[:8])
+    if not rendered:
+        lines.append("- 暂无过程摘要")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _build_parameter_group_wiki_page(title: str, facts: list[sqlite3.Row]) -> str:
+    lines = [f"# {title}", "", "## 参数组"]
+    rendered: list[str] = []
+    for row in facts[:12]:
+        payload = _load_payload(row["object_value"])
+        parameter = str(payload.get("parameter") or "").strip()
+        symbol = str(payload.get("symbol") or "").strip()
+        nominal = str(payload.get("nominal_value") or "").strip()
+        unit = str(payload.get("unit") or "").strip()
+        piece = parameter or symbol
+        if symbol:
+            piece += f"（{symbol}）"
+        if nominal:
+            piece += f" = {nominal}"
+            if unit:
+                piece += unit
+        if piece and piece not in rendered:
+            rendered.append(piece)
+    lines.extend(f"- {item}" for item in rendered[:12])
+    if not rendered:
+        lines.append("- 暂无参数摘要")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _build_constraint_wiki_page(title: str, facts: list[sqlite3.Row]) -> str:
+    lines = [f"# {title}", "", "## 约束与要求"]
+    rendered: list[str] = []
+    for row in facts[:10]:
+        payload = _load_payload(row["object_value"])
+        subject = str(payload.get("subject") or "").strip()
+        condition = str(payload.get("condition") or "").strip()
+        threshold = str(payload.get("threshold") or payload.get("value") or "").strip()
+        content = str(payload.get("content") or "").strip()
+        piece = " / ".join(part for part in [subject, condition, threshold or content] if part)
+        if piece and piece not in rendered:
+            rendered.append(piece)
+    lines.extend(f"- {item}" for item in rendered[:10])
+    if not rendered:
+        lines.append("- 暂无约束摘要")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _build_comparison_wiki_page(title: str, facts: list[sqlite3.Row]) -> str:
+    lines = [f"# {title}", "", "## 比较与类型"]
+    rendered: list[str] = []
+    for row in facts[:12]:
+        payload = _load_payload(row["object_value"])
+        subject = str(payload.get("subject") or "").strip()
+        item = str(payload.get("item") or "").strip()
+        if item:
+            piece = f"{subject} -> {item}" if subject else item
+            if piece not in rendered:
+                rendered.append(piece)
+    lines.extend(f"- {item}" for item in rendered[:12])
+    if not rendered:
+        lines.append("- 暂无比较摘要")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _clean_heading_topic(title: str) -> str:
+    text = re.sub(r"^\d+(?:\.\d+){0,8}\s*", "", title).strip()
+    text = text.replace("#", "").strip()
+    return text
+
+
 def build_wiki_for_document(workspace_root: Path, doc_id: str) -> WikiBuildResult:
     paths = AppPaths.from_root(workspace_root)
     connection = connect(paths.db_file)
@@ -189,7 +286,9 @@ def build_wiki_for_document(workspace_root: Path, doc_id: str) -> WikiBuildResul
 
             target_dir = paths.wiki / subdir
             target_dir.mkdir(parents=True, exist_ok=True)
-            slug = _slugify(str(entity["canonical_name"]))
+            slug = _slugify_with_hash(
+                f"{entity['entity_type']}-{entity['entity_id']}-{entity['canonical_name']}"
+            )
             file_path = target_dir / f"{slug}.md"
             file_path.write_text(content, encoding="utf-8")
             export_paths.append(file_path)
@@ -228,6 +327,9 @@ def build_wiki_for_document(workspace_root: Path, doc_id: str) -> WikiBuildResul
                 ),
             )
 
+        extra_pages = _build_extra_wiki_pages(connection, doc_id, paths, now)
+        export_paths.extend(extra_pages)
+
         connection.commit()
         return WikiBuildResult(
             doc_id=doc_id,
@@ -236,3 +338,281 @@ def build_wiki_for_document(workspace_root: Path, doc_id: str) -> WikiBuildResul
         )
     finally:
         connection.close()
+
+
+def _build_extra_wiki_pages(connection, doc_id: str, paths: AppPaths, now: str) -> list[Path]:
+    export_paths: list[Path] = []
+
+    process_rows = connection.execute(
+        """
+        SELECT fact_id, fact_type, predicate, object_value
+        FROM facts
+        WHERE source_doc_id = ?
+          AND fact_type IN ('process_fact', 'transition_fact')
+        ORDER BY fact_id
+        """,
+        (doc_id,),
+    ).fetchall()
+    process_groups: dict[str, list[sqlite3.Row]] = {}
+    for row in process_rows:
+        payload = _load_payload(row["object_value"])
+        title = str(payload.get("table_title") or payload.get("title") or payload.get("process_name") or "").strip()
+        if title:
+            process_groups.setdefault(title, []).append(row)
+
+    for title, grouped_rows in process_groups.items():
+        slug = _slugify(f"process-{doc_id}-{title}")
+        file_path = paths.wiki / "processes" / f"{slug}.md"
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(_build_process_wiki_page(title, grouped_rows), encoding="utf-8")
+        export_paths.append(file_path)
+        connection.execute(
+            """
+            INSERT INTO wiki_pages (
+                page_id, page_type, title, slug, entity_id, source_fact_ids_json,
+                source_doc_ids_json, trust_status, file_path, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(page_id) DO UPDATE SET
+                page_type = excluded.page_type,
+                title = excluded.title,
+                slug = excluded.slug,
+                source_fact_ids_json = excluded.source_fact_ids_json,
+                source_doc_ids_json = excluded.source_doc_ids_json,
+                trust_status = excluded.trust_status,
+                file_path = excluded.file_path,
+                updated_at = excluded.updated_at
+            """,
+            (
+                f"WPROC-{doc_id}-{slug}",
+                "process",
+                title,
+                slug,
+                None,
+                json.dumps([row["fact_id"] for row in grouped_rows], ensure_ascii=False),
+                json.dumps([doc_id], ensure_ascii=False),
+                "draft",
+                str(file_path),
+                now,
+            ),
+        )
+
+    parameter_rows = connection.execute(
+        """
+        SELECT fact_id, fact_type, predicate, object_value
+        FROM facts
+        WHERE source_doc_id = ?
+          AND fact_type IN ('parameter_value', 'table_requirement')
+        ORDER BY fact_id
+        """,
+        (doc_id,),
+    ).fetchall()
+    parameter_groups: dict[str, list[sqlite3.Row]] = {}
+    for row in parameter_rows:
+        payload = _load_payload(row["object_value"])
+        title = str(payload.get("table_title") or payload.get("title") or payload.get("source_caption") or "").strip()
+        if title and "参数" in title:
+            parameter_groups.setdefault(title, []).append(row)
+
+    for title, grouped_rows in parameter_groups.items():
+        slug = _slugify(f"parameter-{doc_id}-{title}")
+        file_path = paths.wiki / "parameter_groups" / f"{slug}.md"
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(_build_parameter_group_wiki_page(title, grouped_rows), encoding="utf-8")
+        export_paths.append(file_path)
+        connection.execute(
+            """
+            INSERT INTO wiki_pages (
+                page_id, page_type, title, slug, entity_id, source_fact_ids_json,
+                source_doc_ids_json, trust_status, file_path, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(page_id) DO UPDATE SET
+                page_type = excluded.page_type,
+                title = excluded.title,
+                slug = excluded.slug,
+                source_fact_ids_json = excluded.source_fact_ids_json,
+                source_doc_ids_json = excluded.source_doc_ids_json,
+                trust_status = excluded.trust_status,
+                file_path = excluded.file_path,
+                updated_at = excluded.updated_at
+            """,
+            (
+                f"WPAR-{doc_id}-{slug}",
+                "parameter_group",
+                title,
+                slug,
+                None,
+                json.dumps([row["fact_id"] for row in grouped_rows], ensure_ascii=False),
+                json.dumps([doc_id], ensure_ascii=False),
+                "draft",
+                str(file_path),
+                now,
+            ),
+        )
+
+    constraint_rows = connection.execute(
+        """
+        SELECT fact_id, fact_type, predicate, object_value
+        FROM facts
+        WHERE source_doc_id = ?
+          AND fact_type IN ('requirement', 'threshold')
+        ORDER BY fact_id
+        """,
+        (doc_id,),
+    ).fetchall()
+    constraint_groups: dict[str, list[sqlite3.Row]] = {}
+    for row in constraint_rows:
+        payload = _load_payload(row["object_value"])
+        title = str(payload.get("subject") or payload.get("title") or "").strip()
+        if title and len(title) <= 80 and "目次" not in title and "目 次" not in title:
+            constraint_groups.setdefault(title, []).append(row)
+
+    for title, grouped_rows in list(constraint_groups.items())[:24]:
+        slug = _slugify_with_hash(f"constraint-{doc_id}-{title}")
+        file_path = paths.wiki / "constraints" / f"{slug}.md"
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(_build_constraint_wiki_page(title, grouped_rows), encoding="utf-8")
+        export_paths.append(file_path)
+        connection.execute(
+            """
+            INSERT INTO wiki_pages (
+                page_id, page_type, title, slug, entity_id, source_fact_ids_json,
+                source_doc_ids_json, trust_status, file_path, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(page_id) DO UPDATE SET
+                page_type = excluded.page_type,
+                title = excluded.title,
+                slug = excluded.slug,
+                source_fact_ids_json = excluded.source_fact_ids_json,
+                source_doc_ids_json = excluded.source_doc_ids_json,
+                trust_status = excluded.trust_status,
+                file_path = excluded.file_path,
+                updated_at = excluded.updated_at
+            """,
+            (
+                f"WCON-{doc_id}-{slug}",
+                "constraint",
+                title,
+                slug,
+                None,
+                json.dumps([row["fact_id"] for row in grouped_rows], ensure_ascii=False),
+                json.dumps([doc_id], ensure_ascii=False),
+                "draft",
+                str(file_path),
+                now,
+            ),
+        )
+
+    heading_rows = connection.execute(
+        """
+        SELECT fact_id, fact_type, predicate, object_value, qualifiers_json
+        FROM facts
+        WHERE source_doc_id = ?
+          AND fact_type = 'section_heading'
+        ORDER BY fact_id
+        """,
+        (doc_id,),
+    ).fetchall()
+    for row in heading_rows:
+        payload = _load_payload(row["object_value"])
+        raw_title = str(payload.get("title") or "").strip()
+        topic_title = _clean_heading_topic(raw_title)
+        if not topic_title or len(topic_title) > 24:
+            continue
+        if any(token in topic_title for token in ("前言", "引言", "范围", "术语和定义", "规范性引用文件")):
+            continue
+        if not any(token in topic_title for token in ("急停", "停机", "锁止", "保护", "维修", "使用条件", "标识", "说明")):
+            continue
+        slug = _slugify_with_hash(f"constraint-topic-{doc_id}-{topic_title}")
+        file_path = paths.wiki / "constraints" / f"{slug}.md"
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(f"# {topic_title}\n\n## 主题\n- 来自章节标题：{raw_title}\n", encoding="utf-8")
+        export_paths.append(file_path)
+        connection.execute(
+            """
+            INSERT INTO wiki_pages (
+                page_id, page_type, title, slug, entity_id, source_fact_ids_json,
+                source_doc_ids_json, trust_status, file_path, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(page_id) DO UPDATE SET
+                page_type = excluded.page_type,
+                title = excluded.title,
+                slug = excluded.slug,
+                source_fact_ids_json = excluded.source_fact_ids_json,
+                source_doc_ids_json = excluded.source_doc_ids_json,
+                trust_status = excluded.trust_status,
+                file_path = excluded.file_path,
+                updated_at = excluded.updated_at
+            """,
+            (
+                f"WCONTOP-{doc_id}-{slug}",
+                "constraint",
+                topic_title,
+                slug,
+                None,
+                json.dumps([row["fact_id"]], ensure_ascii=False),
+                json.dumps([doc_id], ensure_ascii=False),
+                "draft",
+                str(file_path),
+                now,
+            ),
+        )
+
+    comparison_rows = connection.execute(
+        """
+        SELECT fact_id, fact_type, predicate, object_value
+        FROM facts
+        WHERE source_doc_id = ?
+          AND fact_type = 'comparison_relation'
+        ORDER BY fact_id
+        """,
+        (doc_id,),
+    ).fetchall()
+    comparison_groups: dict[str, list[sqlite3.Row]] = {}
+    for row in comparison_rows:
+        payload = _load_payload(row["object_value"])
+        title = str(payload.get("subject") or "").strip()
+        if title:
+            comparison_groups.setdefault(title, []).append(row)
+
+    for title, grouped_rows in comparison_groups.items():
+        slug = _slugify_with_hash(f"comparison-{doc_id}-{title}")
+        file_path = paths.wiki / "comparisons" / f"{slug}.md"
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(_build_comparison_wiki_page(title, grouped_rows), encoding="utf-8")
+        export_paths.append(file_path)
+        connection.execute(
+            """
+            INSERT INTO wiki_pages (
+                page_id, page_type, title, slug, entity_id, source_fact_ids_json,
+                source_doc_ids_json, trust_status, file_path, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(page_id) DO UPDATE SET
+                page_type = excluded.page_type,
+                title = excluded.title,
+                slug = excluded.slug,
+                source_fact_ids_json = excluded.source_fact_ids_json,
+                source_doc_ids_json = excluded.source_doc_ids_json,
+                trust_status = excluded.trust_status,
+                file_path = excluded.file_path,
+                updated_at = excluded.updated_at
+            """,
+            (
+                f"WCMP-{doc_id}-{slug}",
+                "comparison",
+                title,
+                slug,
+                None,
+                json.dumps([row["fact_id"] for row in grouped_rows], ensure_ascii=False),
+                json.dumps([doc_id], ensure_ascii=False),
+                "draft",
+                str(file_path),
+                now,
+            ),
+        )
+
+    return export_paths

@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass
 
+from .query_semantic_parser import parse_semantic_query
 from .synonyms import expand_with_synonyms
 
 
@@ -11,6 +12,7 @@ class RewrittenQuery:
     original_query: str
     normalized_query: str
     query_type: str
+    target_topic: str
     aliases: list[str]
     must_terms: list[str]
     should_terms: list[str]
@@ -22,17 +24,38 @@ class RewrittenQuery:
 
 def rewrite_query(query: str) -> RewrittenQuery:
     original = query.strip()
-    normalized = _normalize_query(original)
-    query_type = _detect_query_type(original, normalized)
+    semantic = parse_semantic_query(original)
+    normalized = semantic.normalized_query.strip() if semantic.used_llm else _normalize_query(original)
+    if not normalized:
+        normalized = _normalize_query(original)
+
+    rule_query_type = _detect_query_type(original, normalized)
+    query_type = semantic.query_type if semantic.used_llm and semantic.confidence >= 0.45 else rule_query_type
+    if query_type == "general_search" and rule_query_type != "general_search":
+        query_type = rule_query_type
+
     must_terms = _must_terms(original, normalized, query_type)
+    for term in semantic.must_terms:
+        if term and term not in must_terms:
+            must_terms.append(term)
+    if semantic.target_topic and semantic.target_topic not in must_terms and len(semantic.target_topic) <= 24:
+        must_terms.append(semantic.target_topic)
     negative_terms = _negative_terms(original)
     aliases = _aliases(original, normalized, must_terms)
+    for alias in semantic.aliases:
+        if alias and alias not in aliases and alias != original and alias != normalized:
+            aliases.append(alias)
     should_terms = _should_terms(normalized, aliases, must_terms, negative_terms)
+    for term in semantic.should_terms:
+        cleaned = str(term).strip()
+        if cleaned and cleaned not in should_terms and cleaned not in negative_terms:
+            should_terms.append(cleaned)
 
     return RewrittenQuery(
         original_query=original,
         normalized_query=normalized,
         query_type=query_type,
+        target_topic=semantic.target_topic.strip() if semantic.target_topic.strip() else normalized,
         aliases=aliases,
         must_terms=must_terms,
         should_terms=should_terms,
@@ -47,6 +70,10 @@ def _normalize_query(query: str) -> str:
         r"^\s*(.+?)\s*怎么定义\s*$",
         r"^\s*(.+?)\s*如何定义\s*$",
         r"^\s*(.+?)\s*是什么\s*$",
+        r"^\s*(.+?)\s*有什么要求\s*$",
+        r"^\s*(.+?)\s*要求是什么\s*$",
+        r"^\s*(.+?)\s*应满足什么\s*$",
+        r"^\s*(.+?)\s*应符合什么\s*$",
         r"^\s*什么是\s*(.+?)\s*$",
         r"^\s*(.+?)\s*如何理解\s*$",
         r"^\s*(.+?)\s*怎么理解\s*$",
@@ -69,12 +96,14 @@ def _detect_query_type(original_query: str, normalized_query: str) -> str:
         return "standard_lookup"
     if re.search(r"(有哪些类型|包括哪些类型|有哪些种类|包括哪些种类|包含哪些类型|分为哪些类型|类型有哪些|种类有哪些|分类有哪些)", original_query):
         return "comparison"
+    if re.search(r"(时序|流程|阶段|启动|结束|停机|握手|预充|能量传输|状态\s*\d|状态迁移)", original_query):
+        return "timing_lookup"
+    if re.search(r"(阻值|电阻|参数值|参数有哪些|参数是什么|哪些参数|电压值|电流值|欧姆|Ω|检测点\s*\d|CC1|CC2|CP|占空比|频率)", original_query, re.I):
+        return "parameter_lookup"
     if re.search(r"(有什么要求|要求是什么|应满足什么|应符合什么|不应超过什么|不小于什么)", original_query):
         return "constraint"
     if re.search(r"(什么是|是什么|定义|怎么定义|如何定义|是怎么定义的|如何理解|怎么理解)", original_query):
         return "definition"
-    if re.search(r"(阻值|电阻|参数值)", original_query):
-        return "section_lookup"
     if re.search(r"(表\s*\d+|表\d+|字段|参数|指标|效率|功率因数|允差)", original_query):
         return "section_lookup"
     if any(token in original_query for token in ("范围", "适用于", "适用范围")):
@@ -101,7 +130,7 @@ def _must_terms(original_query: str, normalized_query: str, query_type: str) -> 
             terms.append(term)
     if query_type == "definition" and normalized_query and normalized_query not in terms:
         terms.append(normalized_query)
-    if query_type in {"constraint", "section_lookup"} and normalized_query:
+    if query_type in {"constraint", "section_lookup", "parameter_lookup"} and normalized_query:
         for token in _extract_domain_terms(original_query):
             if token not in terms:
                 terms.append(token)
@@ -174,6 +203,13 @@ def _extract_domain_terms(query: str) -> list[str]:
         r"(插销拔出力)",
         r"(温升)",
         r"(绝缘电阻)",
+        r"(电阻)",
+        r"(阻值)",
+        r"(CC1?)",
+        r"(CC2)",
+        r"(检测点\s*\d)",
+        r"(占空比)",
+        r"(频率)",
         r"(保护门)",
     ]:
         for match in re.finditer(pattern, query):

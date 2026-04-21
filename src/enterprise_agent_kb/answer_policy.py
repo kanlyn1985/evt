@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
+
 
 POLICY_BY_QUERY_TYPE = {
     "definition": "definition",
     "standard_lookup": "standard_lookup",
     "lifecycle_lookup": "lifecycle_lookup",
+    "parameter_lookup": "general_search",
+    "timing_lookup": "general_search",
     "section_lookup": "section_lookup",
     "comparison": "comparison",
     "general_search": "general_search",
@@ -107,6 +111,15 @@ def build_direct_answer(
             parts.append(f"代替标准是 {replaced}")
         if parts:
             return "，".join(parts) + "。"
+
+    if any(token in query for token in ("阻值", "电阻", "参数", "检测点")):
+        parameter_answer = _build_parameter_answer(query, facts)
+        if parameter_answer:
+            return parameter_answer
+    if any(token in query for token in ("时序", "流程", "阶段", "握手", "预充", "停机", "状态")):
+        process_answer = _build_process_answer(query, facts)
+        if process_answer:
+            return process_answer
 
     if policy == "comparison":
         comparison_answer = _build_comparison_answer(query, facts, evidence)
@@ -244,6 +257,12 @@ def _build_requirement_answer(query: str, facts: list[dict[str, object]]) -> str
 
 
 def _build_parameter_answer(query: str, facts: list[dict[str, object]]) -> str:
+    focus_pages = _parameter_focus_pages(query, facts)
+    requested_loop = _requested_loop_scope(query)
+    if "参数表" in query or ("表" in query and "参数" in query):
+        table_answer = _build_parameter_table_title_answer(query, facts, focus_pages)
+        if table_answer:
+            return table_answer
     parameter_rows = []
     for item in facts:
         if item.get("fact_type") != "parameter_value":
@@ -251,27 +270,80 @@ def _build_parameter_answer(query: str, facts: list[dict[str, object]]) -> str:
         payload = item.get("object")
         if not isinstance(payload, dict):
             continue
+        object_name = str(payload.get("object", "")).strip()
         parameter = str(payload.get("parameter", "")).strip()
         symbol = str(payload.get("symbol", "")).strip()
         unit = str(payload.get("unit", "")).strip()
         nominal = str(payload.get("nominal_value", "")).strip()
         state = str(payload.get("state", "")).strip()
+        loop_scope = str(payload.get("loop_scope", "")).strip().lower()
+        focus_tags = [str(tag).upper() for tag in payload.get("focus_tags") or []]
+        row_focus_tags = [str(tag).upper() for tag in payload.get("row_focus_tags") or []]
+        table_focus_tags = [str(tag).upper() for tag in payload.get("table_focus_tags") or []]
+        detection_points = [str(tag) for tag in payload.get("detection_points") or []]
+        scope_confidence = str(payload.get("scope_confidence", "")).strip().lower()
 
-        if "CC" in query.upper():
-            if "CC" not in state.upper() and "CC" not in parameter.upper() and "CC" not in symbol.upper():
-                if not (symbol.startswith("R") and unit == "Ω"):
-                    continue
+        if requested_loop == "cc":
+            blob = f"{object_name} {parameter} {symbol} {state} {' '.join(focus_tags)}".upper()
+            if loop_scope != "cc" and "CC1" not in blob and "CC2" not in blob:
+                continue
+        if requested_loop == "cp":
+            blob = f"{object_name} {parameter} {symbol} {state} {' '.join(focus_tags)}".upper()
+            if loop_scope != "cp" and "CP" not in blob:
+                continue
         if "阻值" in query or "电阻" in query:
             if unit != "Ω" and not symbol.startswith("R") and "电阻" not in parameter:
                 continue
+        detection_match = __import__("re").search(r"(检测点\s*\d)", query)
+        if detection_match:
+            requested_point = detection_match.group(1)
+            if requested_point not in detection_points and requested_point not in f"{parameter}{state}{object_name}":
+                continue
 
-        parameter_rows.append((parameter, symbol, nominal, unit, state))
+        page_no = int(item.get("page_no") or 0)
+        focus_score = 0
+        if focus_pages and page_no in focus_pages:
+            focus_score += 3
+        elif focus_pages:
+            continue
+        blob = f"{object_name} {parameter} {symbol} {state} {' '.join(focus_tags)}".upper()
+        if requested_loop == "cc" and ("CC1" in row_focus_tags or "CC2" in row_focus_tags):
+            focus_score += 6
+        elif requested_loop == "cc" and ("CC1" in table_focus_tags or "CC2" in table_focus_tags):
+            focus_score += 4
+        if requested_loop == "cp" and "CP" in row_focus_tags:
+            focus_score += 6
+        elif requested_loop == "cp" and "CP" in table_focus_tags:
+            focus_score += 4
+        if requested_loop == "cc" and loop_scope == "cc":
+            focus_score += 2
+        if scope_confidence == "row":
+            focus_score += 1.5
+        parameter_rows.append(
+            (
+                focus_score,
+                page_no,
+                object_name,
+                parameter,
+                symbol,
+                nominal,
+                unit,
+                state,
+                str(payload.get("source_caption", "")).strip(),
+                loop_scope,
+                scope_confidence,
+            )
+        )
 
     if not parameter_rows:
-        return ""
+        table_answer = _build_parameter_table_answer(query, facts, focus_pages)
+        return table_answer
 
+    parameter_rows.sort(key=lambda item: (-item[0], item[1], item[3], item[4]))
+    deduped_rows = _dedupe_parameter_rows(parameter_rows)
     rendered = []
-    for parameter, symbol, nominal, unit, state in parameter_rows[:8]:
+    source_caption = ""
+    for _, _, object_name, parameter, symbol, nominal, unit, state, caption, _, _ in deduped_rows[:10]:
         piece = f"{parameter or symbol}"
         if symbol:
             piece += f"（{symbol}）"
@@ -279,10 +351,226 @@ def _build_parameter_answer(query: str, facts: list[dict[str, object]]) -> str:
             piece += f" = {nominal}"
             if unit:
                 piece += unit
+        if object_name:
+            piece = f"{object_name}: {piece}"
         if state:
             piece += f"（{state}）"
         rendered.append(piece)
-    return "相关参数包括：" + "；".join(rendered) + "。"
+        if not source_caption and caption:
+            source_caption = caption
+    if not rendered:
+        table_answer = _build_parameter_table_answer(query, facts, focus_pages)
+        if table_answer:
+            return table_answer
+    prefix = f"{source_caption}：" if source_caption else "相关参数包括："
+    return prefix + "；".join(rendered) + "。"
+
+
+def _build_process_answer(query: str, facts: list[dict[str, object]]) -> str:
+    transition_items = [item for item in facts if item.get("fact_type") == "transition_fact"]
+    process_items = [item for item in facts if item.get("fact_type") == "process_fact"]
+    table_items = [item for item in facts if item.get("fact_type") == "table_requirement"]
+
+    if transition_items:
+        rendered: list[str] = []
+        title = ""
+        for item in transition_items[:8]:
+            payload = item.get("object")
+            if not isinstance(payload, dict):
+                continue
+            title = title or str(payload.get("table_title") or payload.get("title") or "").strip()
+            sequence = str(payload.get("sequence") or "").strip()
+            state = str(payload.get("state") or "").strip()
+            condition = str(payload.get("condition") or "").strip()
+            action = str(payload.get("action") or "").strip()
+            time_constraint = str(payload.get("time_constraint") or "").strip()
+            piece = " / ".join(part for part in [sequence, state, condition, action, time_constraint] if part)
+            if piece and piece not in rendered:
+                rendered.append(piece)
+        if rendered:
+            prefix = f"{title}：" if title else "相关时序包括："
+            return prefix + "；".join(rendered[:6]) + "。"
+
+    if process_items:
+        rendered: list[str] = []
+        title = ""
+        for item in process_items[:6]:
+            payload = item.get("object")
+            if not isinstance(payload, dict):
+                continue
+            title = title or str(payload.get("process_name") or payload.get("title") or "").strip()
+            text = str(payload.get("action") or payload.get("step_text") or "").strip()
+            if text and text not in rendered:
+                rendered.append(text)
+        if rendered:
+            prefix = f"{title}：" if title else "相关过程包括："
+            return prefix + "；".join(rendered[:4]) + "。"
+
+    for item in table_items:
+        payload = item.get("object")
+        if not isinstance(payload, dict):
+            continue
+        title = str(payload.get("table_title") or payload.get("title") or "").strip()
+        headers = payload.get("headers") or []
+        rows = payload.get("rows") or []
+        if title and "时序" in title and rows:
+            preview = "；".join(str(cell) for cell in rows[0][:4])
+            return f"{title}：示例行 {preview}。"
+    return ""
+
+
+def _parameter_focus_pages(query: str, facts: list[dict[str, object]]) -> set[int]:
+    focus_pages: set[int] = set()
+    focus_terms = []
+    if "CC" in query.upper():
+        focus_terms.extend(["CC1", "CC2"])
+    if "CP" in query.upper():
+        focus_terms.extend(["CP"])
+    for item in facts:
+        payload = item.get("object")
+        page_no = int(item.get("page_no") or 0)
+        if not page_no or not isinstance(payload, dict):
+            continue
+        blob = json.dumps(payload, ensure_ascii=False).upper()
+        if any(term in blob for term in focus_terms):
+            for candidate in range(max(1, page_no - 1), page_no + 2):
+                focus_pages.add(candidate)
+    if focus_pages:
+        return focus_pages
+    if "CC" in query.upper():
+        for item in facts:
+            payload = item.get("object")
+            page_no = int(item.get("page_no") or 0)
+            if not page_no or not isinstance(payload, dict):
+                continue
+            blob = json.dumps(payload, ensure_ascii=False).upper()
+            if "控制导引" in blob or "检测点" in blob:
+                for candidate in range(max(1, page_no - 1), page_no + 2):
+                    focus_pages.add(candidate)
+    return focus_pages
+
+
+def _build_parameter_table_answer(query: str, facts: list[dict[str, object]], focus_pages: set[int]) -> str:
+    requested_loop = _requested_loop_scope(query)
+    rendered: list[str] = []
+    for item in facts:
+        if item.get("fact_type") != "table_requirement":
+            continue
+        page_no = int(item.get("page_no") or 0)
+        if focus_pages and page_no not in focus_pages:
+            continue
+        payload = item.get("object")
+        if not isinstance(payload, dict):
+            continue
+        rows = payload.get("rows") or []
+        title = str(payload.get("table_title") or payload.get("title") or "参数表").strip()
+        for row in rows:
+            if not isinstance(row, list) or len(row) < 4:
+                continue
+            row_text = " ".join(str(cell) for cell in row)
+            if requested_loop == "cc" and "CC1" not in row_text.upper() and "CC2" not in row_text.upper():
+                if "控制导引" not in title and "检测点" not in row_text:
+                    continue
+            if requested_loop == "cp" and "CP" not in row_text.upper():
+                if "控制导引" not in title and "检测点" not in row_text:
+                    continue
+            symbol = ""
+            nominal = ""
+            unit = ""
+            if len(row) >= 6:
+                symbol = str(row[1]).strip()
+                unit = str(row[2]).strip()
+                nominal = str(row[3]).strip()
+            if not symbol.startswith("R") and "Ω" not in row_text and "电阻" not in row_text:
+                continue
+            label = str(row[0]).strip() or symbol
+            piece = f"{label}"
+            if symbol:
+                piece += f"（{symbol}）"
+            if nominal:
+                piece += f" = {nominal}"
+                if unit:
+                    piece += unit
+            if piece not in rendered:
+                rendered.append(piece)
+            if len(rendered) >= 8:
+                break
+        if rendered:
+            return f"{title}：{'；'.join(rendered)}。"
+    return ""
+
+
+def _build_parameter_table_title_answer(query: str, facts: list[dict[str, object]], focus_pages: set[int]) -> str:
+    requested_loop = _requested_loop_scope(query)
+    candidates: list[tuple[int, int, str]] = []
+    for item in facts:
+        if item.get("fact_type") != "table_requirement":
+            continue
+        page_no = int(item.get("page_no") or 0)
+        if focus_pages and page_no not in focus_pages:
+            continue
+        payload = item.get("object")
+        if not isinstance(payload, dict):
+            continue
+        title = str(payload.get("table_title") or payload.get("title") or "").strip()
+        if not title:
+            continue
+        score = 0
+        blob = json.dumps(payload, ensure_ascii=False).upper()
+        if requested_loop == "cc" and ("CC1" in blob or "CC2" in blob):
+            score += 4
+        if requested_loop == "cp" and "CP" in blob:
+            score += 4
+        if "控制导引" in title:
+            score += 2
+        if "参数" in title:
+            score += 2
+        if focus_pages and page_no in focus_pages:
+            score += 1
+        candidates.append((score, page_no, title))
+    if not candidates:
+        return ""
+    candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
+    return f"最相关的参数表是：{candidates[0][2]}。"
+
+
+def _requested_loop_scope(query: str) -> str | None:
+    upper_query = query.upper()
+    if "CC" in upper_query:
+        return "cc"
+    if "CP" in upper_query:
+        return "cp"
+    return None
+
+
+def _dedupe_parameter_rows(
+    rows: list[tuple[float, int, str, str, str, str, str, str, str, str, str]]
+) -> list[tuple[float, int, str, str, str, str, str, str, str, str, str]]:
+    best_by_key: dict[tuple[str, str], tuple[float, int, str, str, str, str, str, str, str, str, str]] = {}
+    for row in rows:
+        score, page_no, object_name, parameter, symbol, nominal, unit, state, caption, loop_scope, scope_confidence = row
+        key = ((symbol or parameter).strip().upper(), (nominal or "").strip())
+        existing = best_by_key.get(key)
+        if existing is None:
+            best_by_key[key] = row
+            continue
+        existing_score = _parameter_row_rank(existing)
+        current_score = _parameter_row_rank(row)
+        if current_score > existing_score:
+            best_by_key[key] = row
+    deduped = list(best_by_key.values())
+    deduped.sort(key=lambda item: (-item[0], item[1], item[3], item[4]))
+    return deduped
+
+
+def _parameter_row_rank(
+    row: tuple[float, int, str, str, str, str, str, str, str, str, str]
+) -> tuple[float, int, int, int]:
+    score, page_no, _object_name, _parameter, _symbol, _nominal, _unit, state, _caption, _loop_scope, scope_confidence = row
+    state_penalty = 1 if state and any(token in state for token in ("通用", "见图")) else 0
+    scope_bonus = 1 if scope_confidence == "row" else 0
+    has_state_bonus = 1 if state else 0
+    return (score, scope_bonus, -state_penalty, has_state_bonus)
 
 
 def _aggregate_requirement_facts(query: str, facts: list[dict[str, object]]) -> str:

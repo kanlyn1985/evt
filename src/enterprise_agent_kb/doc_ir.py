@@ -114,6 +114,12 @@ def _normalize_block_type(block_type: str, text: str) -> str:
         if "<table" in text.lower():
             return "table"
         return "paragraph"
+    if lowered == "structure_markdown":
+        if text.lstrip().startswith("#"):
+            return "heading"
+        if "<table" in text.lower() or "|" in text:
+            return "table"
+        return "paragraph"
     if lowered == "text":
         stripped = text.strip()
         if stripped.startswith("#") or stripped.startswith("##"):

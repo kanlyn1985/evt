@@ -13,6 +13,8 @@ CHANNEL_PRIORITY: dict[str, list[str]] = {
     "definition": ["facts", "wiki", "evidence", "document"],
     "standard_lookup": ["document", "facts", "wiki", "evidence"],
     "lifecycle_lookup": ["document", "facts", "wiki", "evidence"],
+    "timing_lookup": ["wiki", "facts", "evidence", "document"],
+    "parameter_lookup": ["wiki", "facts", "evidence", "document"],
     "section_lookup": ["document", "facts", "evidence", "wiki"],
     "scope": ["document", "evidence", "facts", "wiki"],
     "constraint": ["facts", "evidence", "document", "wiki"],
@@ -91,7 +93,7 @@ def _structured_hits(
             if existing is None or float(hit["score"] or 0) > float(existing["score"] or 0):
                 merged[key] = dict(hit)
 
-    if channel == "facts" and rewritten.query_type in {"constraint", "section_lookup"}:
+    if channel == "facts" and rewritten.query_type in {"constraint", "section_lookup", "parameter_lookup", "timing_lookup"}:
         for hit in _direct_fact_hits(connection, rewritten, limit):
             key = (hit["result_type"], hit["result_id"])
             existing = merged.get(key)
@@ -175,7 +177,7 @@ def _direct_fact_hits(connection, rewritten: RewrittenQuery, limit: int) -> list
             SELECT fact_id, source_doc_id, json_extract(qualifiers_json, '$.page_no') AS page_no,
                    object_value, confidence
             FROM facts
-            WHERE fact_type IN ('requirement', 'table_requirement', 'threshold')
+            WHERE fact_type IN ('requirement', 'table_requirement', 'threshold', 'parameter_value', 'process_fact', 'transition_fact')
               AND object_value LIKE ?
             ORDER BY confidence DESC, fact_id ASC
             LIMIT ?

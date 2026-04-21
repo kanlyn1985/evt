@@ -28,6 +28,18 @@ SYNONYM_MAP: dict[str, list[str]] = {
         "电动汽车用传导式车载充电机",
         "on-board charger",
     ],
+    "CC": [
+        "CC1",
+        "CC2",
+        "控制导引",
+        "控制导引电路",
+    ],
+    "CP": [
+        "控制导引",
+        "控制导引电路",
+        "control pilot",
+        "检测点",
+    ],
 }
 
 

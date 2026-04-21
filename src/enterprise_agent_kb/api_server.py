@@ -17,7 +17,7 @@ from .answer_api import answer_query
 from .config import AppPaths
 from .doc_diagnostics import build_document_diagnostics
 from .generated_tests import generate_golden_tests_for_document, run_golden_tests_for_document
-from .pipeline import run_document_pipeline
+from .pipeline import run_document_pipeline, run_document_pipeline_and_tests
 from .parse import parse_document
 from .quality import assess_document_quality
 from .evidence import build_evidence_for_document
@@ -94,9 +94,17 @@ class ApiRequestHandler(BaseHTTPRequestHandler):
             "/answer-query": self._handle_answer_query,
             "/agent-query": self._handle_agent_query,
             "/build-document": self._handle_build_document,
+            "/build-document-and-test": self._handle_build_document_and_test,
+            "/convert-document": self._handle_convert_document,
             "/upload-build": self._handle_upload_build,
+            "/upload-build-and-test": self._handle_upload_build_and_test,
+            "/upload-convert": self._handle_upload_convert,
             "/start-build-document": self._handle_start_build_document,
+            "/start-build-document-and-test": self._handle_start_build_document_and_test,
+            "/start-convert-document": self._handle_start_convert_document,
             "/start-upload-build": self._handle_start_upload_build,
+            "/start-upload-build-and-test": self._handle_start_upload_build_and_test,
+            "/start-upload-convert": self._handle_start_upload_convert,
             "/job-status": self._handle_job_status,
             "/document-detail": self._handle_document_detail,
             "/document-diagnostics": self._handle_document_diagnostics,
@@ -169,6 +177,26 @@ class ApiRequestHandler(BaseHTTPRequestHandler):
         self._record_audit("build_document", {"doc_id": doc_id, "result": result.__dict__})
         self._write_json(HTTPStatus.OK, result.__dict__)
 
+    def _handle_convert_document(self, body: dict[str, Any]) -> None:
+        doc_id = str(body.get("doc_id", "")).strip()
+        result = parse_document(self.server.workspace_root, doc_id)
+        payload = {
+            "doc_id": result.doc_id,
+            "page_count": result.page_count,
+            "block_count": result.block_count,
+            "normalized_path": str(result.normalized_path),
+            "parser_engine": result.parser_engine,
+            "mode": "convert_only",
+        }
+        self._record_audit("convert_document", {"doc_id": doc_id, "result": payload})
+        self._write_json(HTTPStatus.OK, payload)
+
+    def _handle_build_document_and_test(self, body: dict[str, Any]) -> None:
+        doc_id = str(body.get("doc_id", "")).strip()
+        result = run_document_pipeline_and_tests(self.server.workspace_root, doc_id)
+        self._record_audit("build_document_and_test", {"doc_id": doc_id, "result": result.__dict__})
+        self._write_json(HTTPStatus.OK, result.__dict__)
+
     def _handle_upload_build(self, body: dict[str, Any]) -> None:
         filename = str(body.get("filename", "")).strip()
         content_base64 = str(body.get("content_base64", "")).strip()
@@ -200,6 +228,51 @@ class ApiRequestHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def _handle_upload_convert(self, body: dict[str, Any]) -> None:
+        filename = str(body.get("filename", "")).strip()
+        content_base64 = str(body.get("content_base64", "")).strip()
+        if not filename or not content_base64:
+            self._write_json(HTTPStatus.BAD_REQUEST, {"error": "filename_and_content_required"})
+            return
+
+        with tempfile.TemporaryDirectory(prefix="eakb_upload_", dir=str(self.server.project_root)) as temp_dir:
+            temp_path = Path(temp_dir) / filename
+            temp_path.write_bytes(base64.b64decode(content_base64))
+            register_result = register_document(self.server.workspace_root, temp_path)
+            parse_result = parse_document(self.server.workspace_root, register_result.doc_id)
+
+        self._write_json(
+            HTTPStatus.OK,
+            {
+                "doc_id": parse_result.doc_id,
+                "registered": True,
+                "deduplicated": register_result.deduplicated,
+                "page_count": parse_result.page_count,
+                "block_count": parse_result.block_count,
+                "normalized_path": str(parse_result.normalized_path),
+                "parser_engine": parse_result.parser_engine,
+                "mode": "convert_only",
+            },
+        )
+
+    def _handle_upload_build_and_test(self, body: dict[str, Any]) -> None:
+        filename = str(body.get("filename", "")).strip()
+        content_base64 = str(body.get("content_base64", "")).strip()
+        if not filename or not content_base64:
+            self._write_json(HTTPStatus.BAD_REQUEST, {"error": "filename_and_content_required"})
+            return
+
+        with tempfile.TemporaryDirectory(prefix="eakb_upload_", dir=str(self.server.project_root)) as temp_dir:
+            temp_path = Path(temp_dir) / filename
+            temp_path.write_bytes(base64.b64decode(content_base64))
+            register_result = register_document(self.server.workspace_root, temp_path)
+            result = run_document_pipeline_and_tests(self.server.workspace_root, register_result.doc_id)
+
+        payload = result.__dict__.copy()
+        payload["registered"] = True
+        payload["deduplicated"] = register_result.deduplicated
+        self._write_json(HTTPStatus.OK, payload)
+
     def _handle_start_build_document(self, body: dict[str, Any]) -> None:
         doc_id = str(body.get("doc_id", "")).strip()
         if not doc_id:
@@ -207,6 +280,24 @@ class ApiRequestHandler(BaseHTTPRequestHandler):
             return
         job_id = self._create_job("build_document", {"doc_id": doc_id})
         self._record_audit("start_build_document", {"doc_id": doc_id, "job_id": job_id})
+        self._write_json(HTTPStatus.ACCEPTED, {"job_id": job_id, "status": "queued"})
+
+    def _handle_start_convert_document(self, body: dict[str, Any]) -> None:
+        doc_id = str(body.get("doc_id", "")).strip()
+        if not doc_id:
+            self._write_json(HTTPStatus.BAD_REQUEST, {"error": "doc_id_required"})
+            return
+        job_id = self._create_job("convert_document", {"doc_id": doc_id})
+        self._record_audit("start_convert_document", {"doc_id": doc_id, "job_id": job_id})
+        self._write_json(HTTPStatus.ACCEPTED, {"job_id": job_id, "status": "queued"})
+
+    def _handle_start_build_document_and_test(self, body: dict[str, Any]) -> None:
+        doc_id = str(body.get("doc_id", "")).strip()
+        if not doc_id:
+            self._write_json(HTTPStatus.BAD_REQUEST, {"error": "doc_id_required"})
+            return
+        job_id = self._create_job("build_document_and_test", {"doc_id": doc_id})
+        self._record_audit("start_build_document_and_test", {"doc_id": doc_id, "job_id": job_id})
         self._write_json(HTTPStatus.ACCEPTED, {"job_id": job_id, "status": "queued"})
 
     def _handle_start_upload_build(self, body: dict[str, Any]) -> None:
@@ -220,6 +311,32 @@ class ApiRequestHandler(BaseHTTPRequestHandler):
             {"filename": filename, "content_base64": content_base64},
         )
         self._record_audit("start_upload_build", {"filename": filename, "job_id": job_id})
+        self._write_json(HTTPStatus.ACCEPTED, {"job_id": job_id, "status": "queued"})
+
+    def _handle_start_upload_convert(self, body: dict[str, Any]) -> None:
+        filename = str(body.get("filename", "")).strip()
+        content_base64 = str(body.get("content_base64", "")).strip()
+        if not filename or not content_base64:
+            self._write_json(HTTPStatus.BAD_REQUEST, {"error": "filename_and_content_required"})
+            return
+        job_id = self._create_job(
+            "upload_convert",
+            {"filename": filename, "content_base64": content_base64},
+        )
+        self._record_audit("start_upload_convert", {"filename": filename, "job_id": job_id})
+        self._write_json(HTTPStatus.ACCEPTED, {"job_id": job_id, "status": "queued"})
+
+    def _handle_start_upload_build_and_test(self, body: dict[str, Any]) -> None:
+        filename = str(body.get("filename", "")).strip()
+        content_base64 = str(body.get("content_base64", "")).strip()
+        if not filename or not content_base64:
+            self._write_json(HTTPStatus.BAD_REQUEST, {"error": "filename_and_content_required"})
+            return
+        job_id = self._create_job(
+            "upload_build_and_test",
+            {"filename": filename, "content_base64": content_base64},
+        )
+        self._record_audit("start_upload_build_and_test", {"filename": filename, "job_id": job_id})
         self._write_json(HTTPStatus.ACCEPTED, {"job_id": job_id, "status": "queued"})
 
     def _handle_job_status(self, body: dict[str, Any]) -> None:
@@ -335,8 +452,16 @@ class ApiRequestHandler(BaseHTTPRequestHandler):
             self._update_job(job_id, status="running", progress=5, stage="starting")
             if job_type == "build_document":
                 result = self._run_document_pipeline_with_updates(job_id, str(payload["doc_id"]))
+            elif job_type == "build_document_and_test":
+                result = self._run_document_pipeline_and_test_with_updates(job_id, str(payload["doc_id"]))
+            elif job_type == "convert_document":
+                result = self._run_convert_document_with_updates(job_id, str(payload["doc_id"]))
             elif job_type == "upload_build":
                 result = self._run_upload_pipeline_with_updates(job_id, payload)
+            elif job_type == "upload_build_and_test":
+                result = self._run_upload_pipeline_and_test_with_updates(job_id, payload)
+            elif job_type == "upload_convert":
+                result = self._run_upload_convert_with_updates(job_id, payload)
             else:
                 raise ValueError(f"unsupported job type: {job_type}")
             self._update_job(job_id, status="completed", progress=100, stage="completed", result=result)
@@ -378,6 +503,58 @@ class ApiRequestHandler(BaseHTTPRequestHandler):
             self._update_job(job_id, progress=10, stage="ingest")
             register_result = register_document(self.server.workspace_root, temp_path)
             result = self._run_document_pipeline_with_updates(job_id, register_result.doc_id)
+            result["registered"] = True
+            result["deduplicated"] = register_result.deduplicated
+            return result
+
+    def _run_convert_document_with_updates(self, job_id: str, doc_id: str) -> dict[str, Any]:
+        self._update_job(job_id, progress=20, stage="parse")
+        parse_result = parse_document(self.server.workspace_root, doc_id)
+        return {
+            "doc_id": doc_id,
+            "parser_engine": parse_result.parser_engine,
+            "page_count": parse_result.page_count,
+            "block_count": parse_result.block_count,
+            "normalized_path": str(parse_result.normalized_path),
+            "mode": "convert_only",
+        }
+
+    def _run_upload_convert_with_updates(self, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        with tempfile.TemporaryDirectory(prefix="eakb_upload_", dir=str(self.server.project_root)) as temp_dir:
+            temp_path = Path(temp_dir) / str(payload["filename"])
+            temp_path.write_bytes(base64.b64decode(str(payload["content_base64"])))
+            self._update_job(job_id, progress=10, stage="ingest")
+            register_result = register_document(self.server.workspace_root, temp_path)
+            result = self._run_convert_document_with_updates(job_id, register_result.doc_id)
+            result["registered"] = True
+            result["deduplicated"] = register_result.deduplicated
+            return result
+
+    def _run_document_pipeline_and_test_with_updates(self, job_id: str, doc_id: str) -> dict[str, Any]:
+        result = self._run_document_pipeline_with_updates(job_id, doc_id)
+        self._update_job(job_id, progress=96, stage="golden_generate")
+        golden_result = generate_golden_tests_for_document(self.server.workspace_root, doc_id)
+        self._update_job(job_id, progress=98, stage="golden_run")
+        golden_run = run_golden_tests_for_document(self.server.workspace_root, doc_id)
+        result.update(
+            {
+                "golden_case_count": int(golden_result.get("case_count", 0)),
+                "golden_network_case_count": int(golden_result.get("network_case_count", 0)),
+                "golden_local_case_count": int(golden_result.get("local_case_count", 0)),
+                "golden_test_success": bool(golden_run.get("success", False)),
+                "golden_test_passed": int(golden_run.get("passed", 0)),
+                "golden_test_failed": int(golden_run.get("failed", 0)),
+            }
+        )
+        return result
+
+    def _run_upload_pipeline_and_test_with_updates(self, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        with tempfile.TemporaryDirectory(prefix="eakb_upload_", dir=str(self.server.project_root)) as temp_dir:
+            temp_path = Path(temp_dir) / str(payload["filename"])
+            temp_path.write_bytes(base64.b64decode(str(payload["content_base64"])))
+            self._update_job(job_id, progress=10, stage="ingest")
+            register_result = register_document(self.server.workspace_root, temp_path)
+            result = self._run_document_pipeline_and_test_with_updates(job_id, register_result.doc_id)
             result["registered"] = True
             result["deduplicated"] = register_result.deduplicated
             return result

@@ -114,6 +114,8 @@ def _type_bonus(query_type: str, result_type: str) -> float:
         "definition": {"fact": 0.24, "wiki": 0.16, "evidence": 0.08, "document": 0.03},
         "standard_lookup": {"document": 0.24, "fact": 0.2, "wiki": 0.16, "evidence": 0.06},
         "lifecycle_lookup": {"document": 0.24, "fact": 0.2, "wiki": 0.14, "evidence": 0.06},
+        "timing_lookup": {"fact": 0.26, "evidence": 0.2, "document": 0.06, "wiki": 0.04},
+        "parameter_lookup": {"fact": 0.28, "evidence": 0.18, "wiki": 0.06, "document": -0.08},
         "section_lookup": {"fact": 0.22, "evidence": 0.16, "document": 0.14, "wiki": 0.04},
         "scope": {"evidence": 0.18, "fact": 0.12, "document": 0.1, "wiki": 0.05},
         "constraint": {"fact": 0.16, "evidence": 0.14, "document": 0.08, "wiki": 0.04},

@@ -6,9 +6,11 @@ import os
 import sys
 import tempfile
 import unicodedata
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import fitz
 import httpx
@@ -18,6 +20,13 @@ from .db import connect
 from .doc_ir import build_doc_ir, save_doc_ir
 from .ids import next_prefixed_id
 from .layout_cleaner import clean_doc_ir, save_cleaned_doc_ir
+from .pdf_chunking import (
+    load_manifest,
+    preprocess_cache_dir,
+    render_chunk_to_images,
+    save_manifest,
+    split_pdf_into_chunks,
+)
 from .reading_order import restore_reading_order
 
 
@@ -30,12 +39,20 @@ class ParseResult:
     parser_engine: str
 
 
+class MiniMaxUsageLimitError(RuntimeError):
+    pass
+
+
 def _utc_now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
 
 
-def _project_workspace_root() -> Path:
+def _shared_workspace_root() -> Path:
     return Path(__file__).resolve().parents[3]
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
 
 
 def _find_java_bin_dir() -> Path | None:
@@ -59,7 +76,7 @@ def _find_java_bin_dir() -> Path | None:
 
 
 def _load_opendataloader_convert():
-    package_root = _project_workspace_root() / "opendataloader-pdf"
+    package_root = _shared_workspace_root() / "opendataloader-pdf"
     if package_root.exists():
         root_str = str(package_root)
         if root_str not in sys.path:
@@ -99,12 +116,31 @@ def _load_env_file(env_path: Path) -> None:
 
 
 def _load_paddlevl_settings() -> tuple[str, str]:
-    _load_env_file(_project_workspace_root() / "KB" / "knowledge-base" / ".env")
+    _load_env_file(_shared_workspace_root() / "KB" / "knowledge-base" / ".env")
     api_url = os.environ.get("PADDLEVL_API_URL")
     api_token = os.environ.get("PADDLEVL_API_TOKEN")
     if not api_url or not api_token:
         raise RuntimeError("PaddleVL configuration unavailable")
     return api_url, api_token
+
+
+def _load_minimax_settings() -> tuple[str, str]:
+    _load_env_file(_project_root() / ".env")
+    api_host = os.environ.get("MINIMAX_API_HOST", "https://api.minimaxi.com")
+    api_key = os.environ.get("MINIMAX_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("MiniMax configuration unavailable")
+    return api_host.rstrip("/"), api_key
+
+
+def _load_astron_settings() -> tuple[str, str]:
+    """加载 astron-code-latest 模型配置"""
+    _load_env_file(_project_root() / ".env")
+    auth_token = os.environ.get("ANTHROPIC_AUTH_TOKEN")
+    api_base = os.environ.get("ANTHROPIC_BASE_URL", "https://maas-coding-api.cn-huabei-1.xf-yun.com/anthropic")
+    if not auth_token:
+        raise RuntimeError("astron-code-latest configuration unavailable (ANTHROPIC_AUTH_TOKEN)")
+    return api_base.rstrip("/"), auth_token
 
 
 def _summarize_parsed_text(parsed_pages: list[dict[str, object]]) -> tuple[int, int]:
@@ -196,7 +232,7 @@ def _parse_pdf_with_opendataloader(source_path: Path) -> tuple[str, list[dict[st
     )
     page_dimensions = _page_dimensions_from_pdf(source_path)
 
-    temp_root = _project_workspace_root() / "tmp"
+    temp_root = _project_root() / "tmp"
     temp_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="eakb_odl_", dir=str(temp_root)) as tmp_dir:
         output_dir = Path(tmp_dir)
@@ -318,6 +354,334 @@ def _parse_pdf_with_paddlevl(source_path: Path) -> tuple[str, list[dict[str, obj
     return "paddlevl", parsed_pages
 
 
+def _parse_pdf_subset_with_paddlevl(
+    source_path: Path,
+    page_numbers: list[int],
+) -> dict[int, dict[str, object]]:
+    if not page_numbers:
+        return {}
+
+    temp_root = _project_root() / "tmp" / "paddle_subsets"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    ordered_pages = sorted(set(page_numbers))
+    subset_pdf = temp_root / f"{source_path.stem}_subset_{uuid.uuid4().hex}.pdf"
+    source_doc = fitz.open(source_path)
+    subset_doc = fitz.open()
+    try:
+        for page_no in ordered_pages:
+            subset_doc.insert_pdf(source_doc, from_page=page_no - 1, to_page=page_no - 1)
+        subset_doc.save(subset_pdf)
+    finally:
+        subset_doc.close()
+        source_doc.close()
+
+    try:
+        _, subset_pages = _parse_pdf_with_paddlevl(subset_pdf)
+    finally:
+        if subset_pdf.exists():
+            subset_pdf.unlink()
+
+    mapped: dict[int, dict[str, object]] = {}
+    for original_page_no, subset_page in zip(ordered_pages, subset_pages, strict=False):
+        mapped[original_page_no] = subset_page
+    return mapped
+
+
+def _page_image_batches(source_path: Path) -> tuple[Path, list[list[tuple[int, str]]]]:
+    total_pages = len(_page_dimensions_from_pdf(source_path))
+    cache_dir = preprocess_cache_dir(_project_root(), source_path)
+    manifest_path = cache_dir / "manifest.json"
+    if manifest_path.exists():
+        payload = load_manifest(manifest_path)
+        batches: list[list[tuple[int, str]]] = []
+        for chunk in payload.get("chunks", []):
+            batch: list[tuple[int, str]] = []
+            for image in chunk.get("images", []):
+                image_path = Path(str(image["image_path"]))
+                encoded = base64.b64encode(image_path.read_bytes()).decode("ascii")
+                batch.append((int(image["page_no"]), f"data:image/png;base64,{encoded}"))
+            batches.append(batch)
+        return cache_dir, batches
+
+    if total_pages <= 40:
+        document = fitz.open(source_path)
+        try:
+            batch: list[tuple[int, str]] = []
+            for page_index, page in enumerate(document, start=1):
+                pix = page.get_pixmap(matrix=fitz.Matrix(1.8, 1.8), alpha=False)
+                encoded = base64.b64encode(pix.tobytes("png")).decode("ascii")
+                batch.append((page_index, f"data:image/png;base64,{encoded}"))
+            return cache_dir, [batch]
+        finally:
+            document.close()
+
+    batches: list[list[tuple[int, str]]] = []
+    chunk_dir = cache_dir / "chunks"
+    image_dir = cache_dir / "images"
+    chunk_size = 20 if total_pages >= 120 else 25
+    chunks = split_pdf_into_chunks(source_path, chunk_dir, chunk_size=chunk_size)
+    manifest_chunks: list[dict[str, object]] = []
+    for chunk in chunks:
+        images = render_chunk_to_images(chunk, image_dir, scale=1.8)
+        batches.append([(image.page_no, image.data_url) for image in images])
+        manifest_chunks.append(
+            {
+                "start_page": chunk.start_page,
+                "end_page": chunk.end_page,
+                "chunk_pdf": str(chunk.pdf_path),
+                "images": [
+                    {"page_no": image.page_no, "image_path": str(image.image_path)}
+                    for image in images
+                ],
+            }
+        )
+    save_manifest(
+        manifest_path,
+        {
+            "pdf": str(source_path),
+            "chunk_size": chunk_size,
+            "scale": 1.8,
+            "chunk_count": len(chunks),
+            "chunks": manifest_chunks,
+        },
+    )
+    return cache_dir, batches
+
+
+def _call_minimax_vlm(api_host: str, api_key: str, prompt: str, image_url: str) -> str:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "MM-API-Source": "KB1-Parse",
+        "Content-Type": "application/json",
+    }
+    payload = {"prompt": prompt, "image_url": image_url}
+    last_error: Exception | None = None
+    for _ in range(3):
+        try:
+            response = httpx.post(
+                f"{api_host}/v1/coding_plan/vlm",
+                headers=headers,
+                json=payload,
+                timeout=180.0,
+            )
+            response.raise_for_status()
+            data = response.json()
+            base_resp = data.get("base_resp", {})
+            status_code = base_resp.get("status_code")
+            if status_code == 2056:
+                raise MiniMaxUsageLimitError(f"MiniMax usage limit exceeded: {base_resp}")
+            if status_code not in (None, 0):
+                raise RuntimeError(f"MiniMax VLM error: {base_resp}")
+            content = str(data.get("content", "")).strip()
+            if not content:
+                raise RuntimeError("MiniMax VLM returned empty content")
+            return content
+        except MiniMaxUsageLimitError:
+            raise
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"MiniMax VLM failed after retries: {last_error}")
+
+
+def _call_astron_vlm(api_base: str, auth_token: str, prompt: str, image_url: str) -> str:
+    """调用 astron-code-latest 模型进行 OCR"""
+    headers = {
+        "Authorization": f"Bearer {auth_token}",
+        "Content-Type": "application/json",
+        "anthropic-version": "2023-06-01",
+    }
+    payload = {
+        "model": "astron-code-latest",
+        "max_tokens": 4096,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image_url.split(",")[1]}},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
+    }
+    timeout_ms = int(os.environ.get("API_TIMEOUT_MS", "600000"))
+    timeout_sec = timeout_ms / 1000.0
+
+    last_error: Exception | None = None
+    for _ in range(2):
+        try:
+            response = httpx.post(
+                f"{api_base}/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=timeout_sec,
+            )
+            response.raise_for_status()
+            data = response.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            if not content:
+                raise RuntimeError("astron VLM returned empty content")
+            return str(content).strip()
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"astron-code-latest VLM failed after retries: {last_error}")
+
+
+def _minimax_ocr_prompt(page_no: int, total_pages: int) -> str:
+    return (
+        f"你在执行第 {page_no}/{total_pages} 页的严格OCR。请逐行转写这页中所有可见文字，尽量保持原有阅读顺序、"
+        "标题层级、编号、表格字段、单位、中英文、附录编号和参考文献编号。"
+        "输出markdown正文即可，不要解释，不要总结，不要补充图片中没有的内容。"
+        "如果页面包含图题、表题、电路图标注或页眉页码，也要转写出来。"
+    )
+
+
+def _parse_pdf_with_minimax_and_paddlevl(source_path: Path) -> tuple[str, list[dict[str, object]]]:
+    api_host, api_key = _load_minimax_settings()
+    page_dimensions = _page_dimensions_from_pdf(source_path)
+    page_count_hint = len(page_dimensions)
+
+    paddle_pages: list[dict[str, object]] = []
+    use_paddle_assist = page_count_hint <= 60
+    if use_paddle_assist:
+        try:
+            _, paddle_pages = _parse_pdf_with_paddlevl(source_path)
+        except Exception:
+            paddle_pages = []
+
+    cache_dir, page_batches = _page_image_batches(source_path)
+    minimax_results: dict[int, str] = {}
+    ocr_cache_dir = cache_dir / "ocr_text"
+    ocr_cache_dir.mkdir(parents=True, exist_ok=True)
+    page_count_for_prompt = max(len(page_dimensions), sum(len(batch) for batch in page_batches))
+
+    # 尝试加载 astron-code-latest 配置
+    astron_api_base = None
+    astron_auth_token = None
+    try:
+        astron_api_base, astron_auth_token = _load_astron_settings()
+    except RuntimeError:
+        pass  # 使用 MiniMax 作为默认
+
+    def _run_page(page_no: int, image_url: str) -> tuple[int, str]:
+        cache_path = ocr_cache_dir / f"page_{page_no:03d}.md"
+        if cache_path.exists():
+            return page_no, cache_path.read_text(encoding="utf-8")
+        prompt = _minimax_ocr_prompt(page_no, page_count_for_prompt)
+
+        # 优先使用 astron-code-latest，超时后 fallback 到 MiniMax
+        text = None
+        if astron_api_base and astron_auth_token:
+            try:
+                text = _call_astron_vlm(astron_api_base, astron_auth_token, prompt, image_url)
+            except Exception as e:
+                # 超时或失败，fallback 到 MiniMax
+                pass
+
+        if text is None:
+            text = _call_minimax_vlm(api_host, api_key, prompt, image_url)
+
+        cache_path.write_text(text, encoding="utf-8")
+        return page_no, text
+
+    if page_batches and page_batches[0]:
+        first_page_no, first_image_url = page_batches[0][0]
+        preflight_cache = ocr_cache_dir / f"page_{first_page_no:03d}.md"
+        if not preflight_cache.exists():
+            # Preflight 测试：优先尝试 astron
+            preflight_text = None
+            if astron_api_base and astron_auth_token:
+                try:
+                    preflight_text = _call_astron_vlm(astron_api_base, astron_auth_token, _minimax_ocr_prompt(first_page_no, page_count_for_prompt), first_image_url)
+                except Exception:
+                    pass
+            if preflight_text is None:
+                preflight_text = _call_minimax_vlm(api_host, api_key, _minimax_ocr_prompt(first_page_no, page_count_for_prompt), first_image_url)
+            preflight_cache.write_text(preflight_text, encoding="utf-8")
+            minimax_results[first_page_no] = preflight_text
+
+    for batch in page_batches:
+        worker_count = min(4 if page_count_for_prompt > 80 else 3, max(1, len(batch)))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(_run_page, page_no, image_url)
+                for page_no, image_url in batch
+                if page_no not in minimax_results
+            ]
+            for future in as_completed(futures):
+                try:
+                    page_no, text = future.result()
+                    minimax_results[page_no] = text
+                except MiniMaxUsageLimitError:
+                    break
+                except Exception:
+                    continue
+
+    missing_pages = [page_no for page_no in range(1, page_count_for_prompt + 1) if page_no not in minimax_results]
+    paddle_subset_pages: dict[int, dict[str, object]] = {}
+    if missing_pages:
+        try:
+            paddle_subset_pages = _parse_pdf_subset_with_paddlevl(source_path, missing_pages)
+        except Exception:
+            paddle_subset_pages = {}
+
+    parsed_pages: list[dict[str, object]] = []
+    page_count = max(page_count_for_prompt, len(page_dimensions), len(paddle_pages))
+    for page_no in range(1, page_count + 1):
+        width, height = page_dimensions.get(page_no, (None, None))
+        minimax_text = (minimax_results.get(page_no) or "").strip()
+        paddle_text = ""
+        subset_page = paddle_subset_pages.get(page_no)
+        if subset_page:
+            subset_blocks = subset_page.get("blocks", [])
+            if subset_blocks:
+                paddle_text = str(subset_blocks[0].get("text", "")).strip()
+        if page_no <= len(paddle_pages):
+            paddle_blocks = paddle_pages[page_no - 1].get("blocks", [])
+            if paddle_blocks and not paddle_text:
+                paddle_text = str(paddle_blocks[0].get("text", "")).strip()
+
+        primary_text = minimax_text or paddle_text
+        blocks: list[dict[str, object]] = []
+        if primary_text:
+            blocks.append(
+                {
+                    "reading_order": 1,
+                    "block_type": "ocr_markdown",
+                    "text": primary_text,
+                    "raw_text": primary_text,
+                    "bbox": None,
+                }
+            )
+        if paddle_text and paddle_text != primary_text:
+            blocks.append(
+                {
+                    "reading_order": 2,
+                    "block_type": "structure_markdown",
+                    "text": paddle_text,
+                    "raw_text": paddle_text,
+                    "bbox": None,
+                }
+            )
+
+        parsed_pages.append(
+            {
+                "page_no": page_no,
+                "width": width,
+                "height": height,
+                "parser_confidence": 0.96 if minimax_text else 0.82 if paddle_text else 0.1,
+                "ocr_confidence": 0.96 if minimax_text else 0.82 if paddle_text else 0.1,
+                "risk_level": "unknown",
+                "page_status": "parsed",
+                "blocks": blocks,
+            }
+        )
+
+    engine = "minimax+paddlevl" if paddle_pages else "minimax"
+    if astron_api_base and astron_auth_token and minimax_results:
+        engine = "astron+paddlevl" if paddle_pages else "astron"
+    return engine, parsed_pages
+
+
 def _parse_pdf_with_pymupdf(source_path: Path) -> tuple[str, list[dict[str, object]]]:
     parsed_pages: list[dict[str, object]] = []
     document = fitz.open(source_path)
@@ -360,15 +724,18 @@ def _parse_pdf_with_pymupdf(source_path: Path) -> tuple[str, list[dict[str, obje
 
 def _parse_pdf(source_path: Path) -> tuple[str, list[dict[str, object]]]:
     try:
-        engine, parsed_pages = _parse_pdf_with_opendataloader(source_path)
-        if _is_text_sparse(parsed_pages):
-            return _parse_pdf_with_paddlevl(source_path)
-        return engine, parsed_pages
+        return _parse_pdf_with_minimax_and_paddlevl(source_path)
     except Exception:
         try:
-            return _parse_pdf_with_paddlevl(source_path)
+            engine, parsed_pages = _parse_pdf_with_opendataloader(source_path)
+            if _is_text_sparse(parsed_pages):
+                return _parse_pdf_with_paddlevl(source_path)
+            return engine, parsed_pages
         except Exception:
-            return _parse_pdf_with_pymupdf(source_path)
+            try:
+                return _parse_pdf_with_paddlevl(source_path)
+            except Exception:
+                return _parse_pdf_with_pymupdf(source_path)
 
 
 def _parse_text(source_path: Path) -> list[dict[str, object]]:

@@ -199,6 +199,45 @@ def build_entities_for_document(workspace_root: Path, doc_id: str) -> EntitiesBu
                     )
                     entity_ids_for_export[entity_id] = (term, "term", definition or None, confidence)
 
+            elif row["fact_type"] in {"process_fact", "transition_fact"}:
+                process_name = str(
+                    payload.get("table_title")
+                    or payload.get("title")
+                    or payload.get("process_name")
+                    or ""
+                ).strip()
+                if process_name:
+                    entity_id = _ensure_entity(
+                        connection,
+                        canonical_name=process_name,
+                        entity_type="process",
+                        description="Process/timing knowledge object",
+                        confidence=confidence,
+                        now=now,
+                    )
+                    connection.execute(
+                        "UPDATE facts SET object_entity_id = ? WHERE fact_id = ?",
+                        (entity_id, fact_id),
+                    )
+                    entity_ids_for_export[entity_id] = (process_name, "process", "Process/timing knowledge object", confidence)
+
+            elif row["fact_type"] == "table_requirement":
+                table_title = str(payload.get("table_title") or payload.get("title") or "").strip()
+                if table_title and "参数" in table_title:
+                    entity_id = _ensure_entity(
+                        connection,
+                        canonical_name=table_title,
+                        entity_type="parameter_group",
+                        description="Parameter group derived from table",
+                        confidence=confidence,
+                        now=now,
+                    )
+                    connection.execute(
+                        "UPDATE facts SET object_entity_id = ? WHERE fact_id = ?",
+                        (entity_id, fact_id),
+                    )
+                    entity_ids_for_export[entity_id] = (table_title, "parameter_group", "Parameter group derived from table", confidence)
+
         export_items = [
             {
                 "entity_id": entity_id,

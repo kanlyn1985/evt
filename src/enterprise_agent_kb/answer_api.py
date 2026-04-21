@@ -4,7 +4,7 @@ import json
 import re
 from pathlib import Path
 
-from .answer_policy import build_direct_answer as policy_build_direct_answer
+from . import answer_policy
 from .answer_policy import build_summary_lines, select_answer_policy
 from .confidence import compute_confidence_score
 from .config import AppPaths
@@ -54,12 +54,12 @@ def answer_query(
         context = _restrict_context_to_doc(workspace_root, context, primary_doc_id)
 
     documents = context.get("documents", [])
-    facts = _rank_facts(context.get("facts", []), intent, query=query)
-    facts = _augment_facts(workspace_root, documents, facts, query, intent)
+    facts = _apply_subgraph_fact_signals(context, context.get("facts", []), intent, query)
+    facts = _rank_facts(facts, intent, query=query)
+    facts = _augment_facts(workspace_root, documents, facts, rewritten.to_dict(), query, intent)
     evidence = _select_supporting_evidence(workspace_root, facts, query, intent)
     if not evidence:
         evidence = _rank_evidence(context.get("evidence", []), query, intent)[:5]
-    graph_edges = _filter_graph_edges(context.get("graph_edges", []), facts)
     wiki_pages = _filter_wiki_pages(context.get("wiki_pages", []), facts, query, intent)
 
     fact_summaries = _summarize_facts(facts[:5], intent=intent)
@@ -89,6 +89,20 @@ def answer_query(
         for item in evidence[:5]
     ]
 
+    answer_facts = _select_answer_facts(
+        facts,
+        intent,
+        query,
+        context.get("knowledge_subgraph", {}),
+        rewritten.to_dict(),
+    )
+    graph_edges = _filter_graph_edges(
+        workspace_root,
+        context.get("graph_edges", []),
+        answer_facts,
+        intent,
+        primary_doc_id,
+    )
     fact_items = [
         {
             "fact_id": item["fact_id"],
@@ -97,11 +111,12 @@ def answer_query(
             "object": item["object_value"],
             "confidence": item["confidence"],
             "doc_id": item["source_doc_id"],
+            "page_no": item.get("qualifiers_json", {}).get("page_no") if isinstance(item.get("qualifiers_json"), dict) else None,
         }
-        for item in facts[:8]
+        for item in answer_facts[:12]
     ]
 
-    direct_answer = policy_build_direct_answer(
+    direct_answer = answer_policy.build_direct_answer(
         policy=answer_mode,
         query=query,
         facts=fact_items,
@@ -111,6 +126,23 @@ def answer_query(
         standard_extractor=_extract_standard_from_query,
         truncate_fn=_truncate,
     )
+    if direct_answer == "没有找到足够的结构化结果。" and intent == "definition":
+        wiki_fallback = _build_definition_from_wiki(workspace_root, wiki_pages)
+        if wiki_fallback:
+            direct_answer = wiki_fallback
+    if intent == "constraint" and (
+        direct_answer == "没有找到足够的结构化结果。"
+        or direct_answer.startswith("最相关的结构化结果是章节")
+        or _constraint_answer_needs_topic_fallback(rewritten.to_dict(), answer_facts)
+    ):
+        topic_evidence_answer = _build_constraint_from_topic_evidence(
+            workspace_root,
+            rewritten.to_dict(),
+            context.get("wiki_pages", []),
+            primary_doc_id,
+        )
+        if topic_evidence_answer:
+            direct_answer = topic_evidence_answer
     confidence_score = compute_confidence_score(
         answer_mode=answer_mode,
         direct_answer=direct_answer,
@@ -141,8 +173,14 @@ def _intent_from_query_type(query_type: str) -> str:
         return "definition"
     if query_type in {"standard_lookup", "lifecycle_lookup"}:
         return "standard"
+    if query_type in {"parameter_lookup"}:
+        return "parameter"
+    if query_type in {"timing_lookup"}:
+        return "process"
+    if query_type in {"constraint"}:
+        return "constraint"
     if query_type in {"comparison"}:
-        return "general"
+        return "comparison"
     return "general"
 
 
@@ -255,6 +293,7 @@ def _augment_facts(
     workspace_root: Path,
     documents: list[dict[str, object]],
     facts: list[dict[str, object]],
+    rewritten_payload: dict[str, object],
     query: str,
     intent: str,
 ) -> list[dict[str, object]]:
@@ -296,6 +335,168 @@ def _augment_facts(
                 (doc_id, f"%{normalized_query}%"),
             ).fetchall()
             extra = [_row_to_fact(row) for row in rows]
+        elif intent == "parameter":
+            normalized_query = _normalize_query_phrase(query)
+            focus_terms = _parameter_focus_terms(query, rewritten_payload)
+            relevant_pages = _find_relevant_pages_for_query(
+                connection,
+                doc_id,
+                focus_terms,
+            )
+            rows = connection.execute(
+                """
+                SELECT fact_id, fact_type, predicate, object_value, confidence,
+                       source_doc_id, subject_entity_id, object_entity_id, qualifiers_json
+                FROM facts
+                WHERE source_doc_id = ?
+                  AND fact_type IN ('parameter_value', 'table_requirement', 'threshold', 'requirement')
+                ORDER BY
+                    CASE fact_type
+                        WHEN 'parameter_value' THEN 0
+                        WHEN 'table_requirement' THEN 1
+                        WHEN 'threshold' THEN 2
+                        ELSE 3
+                    END,
+                    confidence DESC,
+                    fact_id ASC
+                LIMIT 240
+                """,
+                (doc_id,),
+            ).fetchall()
+            extra = []
+            for row in rows:
+                fact = _row_to_fact(row)
+                qualifiers = fact.get("qualifiers_json")
+                page_no = None
+                if isinstance(qualifiers, dict):
+                    page_no = int(qualifiers.get("page_no") or 0)
+                payload = fact.get("object_value")
+                blob = json.dumps(payload, ensure_ascii=False) if isinstance(payload, (dict, list)) else str(payload or "")
+                focus_bonus = _focus_term_bonus(blob, focus_terms)
+                if focus_bonus:
+                    fact["_focus_term_bonus"] = focus_bonus
+                if page_no and page_no in relevant_pages:
+                    fact["_page_focus_bonus"] = 2.0
+                if any(term and term in blob for term in [normalized_query, *focus_terms]):
+                    extra.append(fact)
+                    continue
+                if page_no and page_no in relevant_pages:
+                    extra.append(fact)
+        elif intent == "process":
+            normalized_query = _normalize_query_phrase(query)
+            rows = connection.execute(
+                """
+                SELECT fact_id, fact_type, predicate, object_value, confidence,
+                       source_doc_id, subject_entity_id, object_entity_id, qualifiers_json
+                FROM facts
+                WHERE source_doc_id = ?
+                  AND fact_type IN ('process_fact', 'transition_fact', 'table_requirement', 'requirement')
+                ORDER BY
+                    CASE fact_type
+                        WHEN 'transition_fact' THEN 0
+                        WHEN 'process_fact' THEN 1
+                        WHEN 'table_requirement' THEN 2
+                        ELSE 3
+                    END,
+                    confidence DESC,
+                    fact_id ASC
+                LIMIT 160
+                """,
+                (doc_id,),
+            ).fetchall()
+            extra = []
+            focus_terms = [
+                normalized_query,
+                *[str(item) for item in rewritten_payload.get("must_terms", [])],
+                *[str(item) for item in rewritten_payload.get("aliases", [])],
+                *[str(item) for item in rewritten_payload.get("should_terms", [])],
+            ]
+            for row in rows:
+                fact = _row_to_fact(row)
+                payload = fact.get("object_value")
+                blob = json.dumps(payload, ensure_ascii=False) if isinstance(payload, (dict, list)) else str(payload or "")
+                if any(term and term in blob for term in focus_terms):
+                    extra.append(fact)
+                    continue
+                if any(token in blob for token in ("时序", "状态", "流程", "握手", "预充", "停机")):
+                    extra.append(fact)
+        elif intent == "comparison":
+            normalized_query = _normalize_query_phrase(query)
+            rows = connection.execute(
+                """
+                SELECT fact_id, fact_type, predicate, object_value, confidence,
+                       source_doc_id, subject_entity_id, object_entity_id, qualifiers_json
+                FROM facts
+                WHERE source_doc_id = ?
+                  AND fact_type IN ('comparison_relation', 'term_definition', 'concept_definition')
+                ORDER BY
+                    CASE fact_type
+                        WHEN 'comparison_relation' THEN 0
+                        ELSE 1
+                    END,
+                    confidence DESC,
+                    fact_id ASC
+                LIMIT 80
+                """,
+                (doc_id,),
+            ).fetchall()
+            extra = []
+            comparison_terms = [
+                normalized_query,
+                *[str(item) for item in rewritten_payload.get("must_terms", [])],
+                *[str(item) for item in rewritten_payload.get("aliases", [])],
+                *[str(item) for item in rewritten_payload.get("should_terms", [])],
+            ]
+            for row in rows:
+                fact = _row_to_fact(row)
+                payload = fact.get("object_value")
+                blob = json.dumps(payload, ensure_ascii=False) if isinstance(payload, (dict, list)) else str(payload or "")
+                if any(term and term in blob for term in comparison_terms):
+                    extra.append(fact)
+                    continue
+                if fact.get("fact_type") == "comparison_relation" and any(token in blob.upper() for token in ("V2X", "V2G", "V2V", "V2B", "V2H")):
+                    extra.append(fact)
+        elif intent == "constraint":
+            normalized_query = _normalize_query_phrase(query)
+            rows = connection.execute(
+                """
+                SELECT fact_id, fact_type, predicate, object_value, confidence,
+                       source_doc_id, subject_entity_id, object_entity_id, qualifiers_json
+                FROM facts
+                WHERE source_doc_id = ?
+                  AND fact_type IN ('threshold', 'requirement', 'table_requirement')
+                ORDER BY
+                    CASE fact_type
+                        WHEN 'threshold' THEN 0
+                        WHEN 'requirement' THEN 1
+                        ELSE 2
+                    END,
+                    confidence DESC,
+                    fact_id ASC
+                LIMIT 120
+                """,
+                (doc_id,),
+            ).fetchall()
+            extra = []
+            constraint_terms = [
+                normalized_query,
+                *[str(item) for item in rewritten_payload.get("must_terms", [])],
+                *[str(item) for item in rewritten_payload.get("aliases", [])],
+                *[str(item) for item in rewritten_payload.get("should_terms", [])],
+            ]
+            for row in rows:
+                fact = _row_to_fact(row)
+                payload = fact.get("object_value")
+                blob = json.dumps(payload, ensure_ascii=False) if isinstance(payload, (dict, list)) else str(payload or "")
+                if isinstance(payload, dict) and str(payload.get("scope_type") or "") in {"index", "preface"}:
+                    continue
+                if any(token in blob for token in ("前言", "前    言", "目 次", "目次")):
+                    continue
+                if any(term and term in blob for term in constraint_terms):
+                    extra.append(fact)
+                    continue
+                if any(token in blob for token in ("要求", "应", "不应", "必须", "切断", "急停", "锁止")):
+                    extra.append(fact)
         else:
             normalized_query = _normalize_query_phrase(query)
             if re.search(r"(CC|阻值|电阻|参数值)", query, re.I):
@@ -399,6 +600,156 @@ def _safe_json(value: str | None) -> object:
         return value
 
 
+def _build_definition_from_wiki(workspace_root: Path, wiki_pages: list[dict[str, object]]) -> str:
+    for item in wiki_pages:
+        file_path = str(item.get("file_path") or "").strip()
+        if not file_path:
+            continue
+        candidate = Path(file_path)
+        if not candidate.is_absolute():
+            candidate = workspace_root / file_path
+        if not candidate.exists():
+            continue
+        try:
+            content = candidate.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        title_match = re.search(r"^#\s+(.+)$", content, re.M)
+        definition_match = re.search(r"^##\s*定义\s*$\s*(.+?)(?=^\s*##|\Z)", content, re.M | re.S)
+        title = title_match.group(1).strip() if title_match else str(item.get("title") or "").strip()
+        definition = ""
+        if definition_match:
+            definition = re.sub(r"\s+", " ", definition_match.group(1)).strip()
+        elif title:
+            definition = re.sub(r"\s+", " ", content.splitlines()[-1]).strip()
+        if title and definition:
+            return f"{title}: {definition}"
+    return ""
+
+
+def _build_constraint_from_topic_evidence(
+    workspace_root: Path,
+    rewritten_payload: dict[str, object],
+    wiki_pages: list[dict[str, object]],
+    doc_id: str | None,
+) -> str:
+    target_topic = str(rewritten_payload.get("target_topic") or "").strip()
+    if not target_topic:
+        return ""
+
+    target_terms = _constraint_target_terms(target_topic, rewritten_payload)
+    if not target_terms:
+        target_terms = [target_topic]
+
+    candidate_pages = [
+        item for item in wiki_pages
+        if str(item.get("page_type") or "") == "constraint"
+        and any(term and term in str(item.get("title") or "") for term in target_terms)
+    ]
+    if not candidate_pages:
+        return ""
+
+    source_fact_ids: list[str] = []
+    for item in candidate_pages:
+        raw_ids = _safe_json(item.get("source_fact_ids_json"))
+        if isinstance(raw_ids, list):
+            for fact_id in raw_ids:
+                value = str(fact_id).strip()
+                if value and value not in source_fact_ids:
+                    source_fact_ids.append(value)
+    if not source_fact_ids:
+        return ""
+
+    paths = AppPaths.from_root(workspace_root)
+    connection = connect(paths.db_file)
+    try:
+        placeholders = ",".join("?" for _ in source_fact_ids)
+        fact_rows = connection.execute(
+            f"""
+            SELECT qualifiers_json
+            FROM facts
+            WHERE fact_id IN ({placeholders})
+            """,
+            source_fact_ids,
+        ).fetchall()
+        page_nos: set[int] = set()
+        for row in fact_rows:
+            qualifiers = _safe_json(row["qualifiers_json"])
+            if isinstance(qualifiers, dict):
+                page_no = int(qualifiers.get("page_no") or 0)
+                if page_no:
+                    for candidate in range(page_no, page_no + 3):
+                        page_nos.add(candidate)
+        if not page_nos:
+            return ""
+
+        placeholders = ",".join("?" for _ in page_nos)
+        params: list[object] = [*sorted(page_nos)]
+        where_doc = ""
+        if doc_id:
+            where_doc = " AND doc_id = ? "
+            params.append(doc_id)
+        rows = connection.execute(
+            f"""
+            SELECT page_no, normalized_text
+            FROM evidence
+            WHERE page_no IN ({placeholders})
+            {where_doc}
+            ORDER BY page_no ASC, confidence DESC
+            LIMIT 6
+            """,
+            params,
+        ).fetchall()
+        for row in rows:
+            text = str(row["normalized_text"] or "").strip()
+            for term in target_terms:
+                if term and term in text:
+                    snippet = _extract_topic_paragraph(text, term)
+                    if snippet:
+                        return snippet
+        return ""
+    finally:
+        connection.close()
+
+
+def _extract_topic_paragraph(text: str, topic: str) -> str:
+    compact = re.sub(r"\n{2,}", "\n", text)
+    pattern = re.compile(rf"(?:#+\s*)?(?:\d+(?:\.\d+){{0,8}}\s*)?{re.escape(topic)}[^\n]*\n(.+?)(?:\n(?:#+\s*|\d+(?:\.\d+){{0,8}}\s)|\Z)", re.S)
+    match = pattern.search(compact)
+    if match:
+        paragraph = match.group(1).strip()
+        if paragraph:
+            return _truncate(paragraph, 600)
+    if topic in compact:
+        start = compact.find(topic)
+        return _truncate(compact[start:start + 600].strip(), 600)
+    return ""
+
+
+def _constraint_answer_needs_topic_fallback(
+    rewritten_payload: dict[str, object],
+    answer_facts: list[dict[str, object]],
+) -> bool:
+    target_topic = str(rewritten_payload.get("target_topic") or "").strip()
+    if not target_topic or not answer_facts:
+        return False
+
+    target_terms = _constraint_target_terms(target_topic, rewritten_payload)
+    if not target_terms:
+        return False
+
+    for item in answer_facts[:3]:
+        payload = item.get("object_value")
+        payload_dict = payload if isinstance(payload, dict) else {}
+        topic_scope = " ".join(
+            str(payload_dict.get(key) or "").strip()
+            for key in ("topic", "subject", "title")
+        )
+        if any(term and term in topic_scope for term in target_terms):
+            return False
+    return True
+
+
 def _normalize_query_phrase(query: str) -> str:
     text = query
     matched_pattern = False
@@ -498,6 +849,74 @@ def _rank_facts(facts: list[dict[str, object]], intent: str, query: str = "") ->
                 value = _normalize_standard_code(str(item["object_value"].get("value", "")))
                 if value and target_standard and value == target_standard:
                     bonus += 2.0
+        elif intent == "parameter":
+            if fact_type == "parameter_value":
+                bonus = 4.0
+            elif fact_type == "table_requirement":
+                bonus = 2.8
+            elif fact_type == "threshold":
+                bonus = 1.6
+            elif fact_type == "requirement":
+                bonus = 1.2
+            payload = item.get("object_value")
+            blob = json.dumps(payload, ensure_ascii=False) if isinstance(payload, (dict, list)) else str(payload or "")
+            if "目 次" in blob or "前    言" in blob or "前言" in blob:
+                bonus -= 5.0
+            if re.search(r"(阻值|电阻|欧姆|Ω)", query) and re.search(r"(Ω|电阻|阻值|R\d+)", blob, re.I):
+                bonus += 3.0
+            if re.search(r"\bCC\b|CC1|CC2", query, re.I) and re.search(r"\bCC\b|CC1|CC2", blob, re.I):
+                bonus += 2.5
+            if re.search(r"(检测点\s*\d)", query) and re.search(r"(检测点\s*\d)", blob):
+                bonus += 2.0
+            if re.search(r"(控制导引|导引电路)", blob):
+                bonus += 1.0
+            bonus += float(item.get("_focus_term_bonus") or 0.0)
+            bonus += float(item.get("_page_focus_bonus") or 0.0)
+            bonus += float(item.get("_subgraph_bonus") or 0.0)
+        elif intent == "process":
+            if fact_type == "transition_fact":
+                bonus = 4.2
+            elif fact_type == "process_fact":
+                bonus = 4.0
+            elif fact_type == "table_requirement":
+                bonus = 2.0
+            elif fact_type == "requirement":
+                bonus = 1.0
+            payload = item.get("object_value")
+            blob = json.dumps(payload, ensure_ascii=False) if isinstance(payload, (dict, list)) else str(payload or "")
+            if any(token in blob for token in ("时序", "状态", "握手", "预充", "停机", "控制时序说明")):
+                bonus += 2.0
+            if "控制导引" in blob or "检测点" in blob or "CP" in blob:
+                bonus += 1.2
+            bonus += float(item.get("_subgraph_bonus") or 0.0)
+        elif intent == "constraint":
+            if fact_type == "threshold":
+                bonus = 4.4
+            elif fact_type == "requirement":
+                bonus = 4.0
+            elif fact_type == "table_requirement":
+                bonus = 2.4
+            elif fact_type == "parameter_value":
+                bonus = 1.4
+            payload = item.get("object_value")
+            blob = json.dumps(payload, ensure_ascii=False) if isinstance(payload, (dict, list)) else str(payload or "")
+            if any(token in blob for token in ("要求", "应", "不应", "应满足", "不得")):
+                bonus += 1.4
+            if any(token in blob for token in ("最大", "最小", "不超过", "不小于", "阈值")):
+                bonus += 1.0
+            bonus += float(item.get("_subgraph_bonus") or 0.0)
+        elif intent == "comparison":
+            if fact_type == "comparison_relation":
+                bonus = 4.6
+            elif fact_type in {"term_definition", "concept_definition"}:
+                bonus = 2.0
+            else:
+                bonus = 0.6
+            payload = item.get("object_value")
+            blob = json.dumps(payload, ensure_ascii=False) if isinstance(payload, (dict, list)) else str(payload or "")
+            if any(token in blob.upper() for token in ("V2X", "V2G", "V2V", "V2B", "V2H")):
+                bonus += 1.2
+            bonus += float(item.get("_subgraph_bonus") or 0.0)
         else:
             if fact_type in {"term_definition", "concept_definition"}:
                 bonus = 1.0
@@ -522,6 +941,7 @@ def _rank_facts(facts: list[dict[str, object]], intent: str, query: str = "") ->
                 bonus += 2.0
             if re.search(r"(阻值|参数|电阻|CC)", query) and fact_type == "parameter_value":
                 bonus += 3.0
+            bonus += float(item.get("_subgraph_bonus") or 0.0)
         return (bonus + confidence, confidence)
 
     return sorted(facts, key=score, reverse=True)
@@ -576,6 +996,20 @@ def _rank_evidence(evidence: list[dict[str, object]], query: str, intent: str) -
                 bonus += 1.5
             if re.search(r"\bGB/T\b", text):
                 bonus += 1.0
+        elif intent == "parameter":
+            if "<table" in text.lower() or "|" in text:
+                bonus += 1.5
+            if re.search(r"(Ω|电阻|阻值|R\d+|检测点\s*\d|CC1|CC2)", text, re.I):
+                bonus += 1.6
+            if "目 次" in text or "前    言" in text or "前言" in text:
+                bonus -= 2.0
+        elif intent == "process":
+            if "<table" in text.lower() or "|" in text:
+                bonus += 1.3
+            if re.search(r"(时序|状态|握手|预充|停机|检测点|控制导引)", text):
+                bonus += 1.8
+            if "目 次" in text or "前    言" in text or "前言" in text:
+                bonus -= 2.2
         else:
             if "<table" in text.lower():
                 bonus -= 1.2
@@ -590,7 +1024,426 @@ def _rank_evidence(evidence: list[dict[str, object]], query: str, intent: str) -
     return sorted(evidence, key=score, reverse=True)
 
 
-def _filter_graph_edges(edges: list[dict[str, object]], facts: list[dict[str, object]]) -> list[dict[str, object]]:
+def _find_relevant_pages_for_query(connection, doc_id: str, terms: list[str]) -> set[int]:
+    relevant: set[int] = set()
+    cleaned_terms = []
+    for term in terms:
+        normalized = str(term or "").strip()
+        if normalized and normalized not in cleaned_terms:
+            cleaned_terms.append(normalized)
+    for term in cleaned_terms[:12]:
+        rows = connection.execute(
+            """
+            SELECT page_no
+            FROM evidence
+            WHERE doc_id = ?
+              AND normalized_text LIKE ?
+            LIMIT 20
+            """,
+            (doc_id, f"%{term}%"),
+        ).fetchall()
+        for row in rows:
+            page_no = int(row["page_no"])
+            for candidate in range(max(1, page_no - 2), page_no + 3):
+                relevant.add(candidate)
+    return relevant
+
+
+def _select_answer_facts(
+    facts: list[dict[str, object]],
+    intent: str,
+    query: str,
+    knowledge_subgraph: dict[str, object] | None = None,
+    rewritten_payload: dict[str, object] | None = None,
+) -> list[dict[str, object]]:
+    if intent not in {"parameter", "process", "definition", "constraint", "comparison"}:
+        return _prioritize_subgraph_facts(facts, knowledge_subgraph)
+
+    if intent == "process":
+        return _select_process_answer_facts(facts, knowledge_subgraph)
+    if intent == "definition":
+        return _select_definition_answer_facts(facts, knowledge_subgraph)
+    if intent == "constraint":
+        return _select_constraint_answer_facts(facts, knowledge_subgraph, query, rewritten_payload or {})
+    if intent == "comparison":
+        return _select_comparison_answer_facts(facts, knowledge_subgraph)
+
+    focus_terms = _parameter_focus_terms(query, {"must_terms": [], "aliases": [], "should_terms": []})
+
+    def score(item: dict[str, object]) -> tuple[float, float]:
+        fact_type = str(item.get("fact_type") or "")
+        confidence = float(item.get("confidence") or 0.0)
+        payload = item.get("object_value")
+        if not isinstance(payload, dict):
+            payload = {}
+        focus_tags = [str(tag).upper() for tag in payload.get("focus_tags") or []]
+        page_bonus = float(item.get("_page_focus_bonus") or 0.0)
+        raw_focus_bonus = float(item.get("_focus_term_bonus") or 0.0)
+        wiki_bonus = 2.2 if item.get("_source_from_wiki") else 0.0
+        subgraph_bonus = float(item.get("_subgraph_bonus") or 0.0)
+        bonus = confidence + page_bonus + raw_focus_bonus + wiki_bonus + subgraph_bonus
+
+        if fact_type == "parameter_value":
+            bonus += 6.0
+        elif fact_type == "table_requirement":
+            bonus += 3.0
+        elif fact_type == "threshold":
+            bonus += 1.0
+        else:
+            bonus += 0.2
+
+        if any(term.upper() in focus_tags for term in focus_terms if term):
+            bonus += 5.0
+        if "CC" in query.upper():
+            if "CC1" in focus_tags or "CC2" in focus_tags:
+                bonus += 4.0
+            elif fact_type == "parameter_value":
+                bonus -= 2.5
+        if re.search(r"(检测点\s*\d)", query):
+            if any("检测点" in tag for tag in focus_tags):
+                bonus += 3.0
+        return (bonus, confidence)
+
+    ranked = sorted(_prioritize_subgraph_facts(facts, knowledge_subgraph), key=score, reverse=True)
+    parameter_first = [item for item in ranked if item.get("fact_type") == "parameter_value"]
+    if parameter_first:
+        supporting_tables = [item for item in ranked if item.get("fact_type") == "table_requirement"]
+        return parameter_first + supporting_tables + [item for item in ranked if item.get("fact_type") not in {"parameter_value", "table_requirement"}]
+    return ranked
+
+
+def _apply_subgraph_fact_signals(
+    context: dict[str, object],
+    facts: list[dict[str, object]],
+    intent: str,
+    query: str,
+) -> list[dict[str, object]]:
+    knowledge_subgraph = context.get("knowledge_subgraph")
+    if not isinstance(knowledge_subgraph, dict):
+        return list(facts)
+
+    seeded_fact_ids = {str(item) for item in knowledge_subgraph.get("seed_fact_ids", []) if str(item).strip()}
+    seeded_entity_ids = {str(item) for item in knowledge_subgraph.get("seed_entity_ids", []) if str(item).strip()}
+    wiki_page_types = {
+        str(item).strip().lower()
+        for item in knowledge_subgraph.get("wiki_page_types", [])
+        if str(item).strip()
+    }
+
+    annotated: list[dict[str, object]] = []
+    for item in facts:
+        cloned = dict(item)
+        bonus = float(cloned.get("_subgraph_bonus") or 0.0)
+        if str(cloned.get("fact_id") or "") in seeded_fact_ids:
+            bonus += 2.5
+        if str(cloned.get("subject_entity_id") or "") in seeded_entity_ids:
+            bonus += 1.5
+        if str(cloned.get("object_entity_id") or "") in seeded_entity_ids:
+            bonus += 1.5
+        if cloned.get("_source_from_wiki"):
+            bonus += 1.2
+
+        fact_type = str(cloned.get("fact_type") or "")
+        if intent == "parameter" and "parameter_group" in wiki_page_types:
+            if fact_type == "parameter_value":
+                bonus += 2.0
+            elif fact_type == "table_requirement":
+                bonus += 0.8
+        elif intent == "process" and "process" in wiki_page_types:
+            if fact_type == "transition_fact":
+                bonus += 2.0
+            elif fact_type == "process_fact":
+                bonus += 1.8
+            elif fact_type == "table_requirement":
+                bonus += 0.6
+        elif intent == "definition" and {"term", "concept"} & wiki_page_types:
+            if fact_type in {"term_definition", "concept_definition"}:
+                bonus += 2.0
+        elif intent == "constraint":
+            if fact_type in {"requirement", "threshold"}:
+                bonus += 1.8
+            elif fact_type == "table_requirement":
+                bonus += 0.8
+            if {"term", "process", "parameter_group"} & wiki_page_types:
+                bonus += 0.6
+        elif intent == "comparison":
+            if fact_type == "comparison_relation":
+                bonus += 2.2
+            elif {"term", "concept"} & wiki_page_types:
+                bonus += 0.6
+
+        if query and any(token in query for token in ("CC", "CP", "V2G", "V2X")):
+            payload = cloned.get("object_value")
+            blob = json.dumps(payload, ensure_ascii=False) if isinstance(payload, (dict, list)) else str(payload or "")
+            if any(token in blob.upper() for token in re.findall(r"[A-Z][A-Z0-9/-]{1,}", query.upper())):
+                bonus += 0.8
+
+        cloned["_subgraph_bonus"] = bonus
+        annotated.append(cloned)
+    return annotated
+
+
+def _prioritize_subgraph_facts(
+    facts: list[dict[str, object]],
+    knowledge_subgraph: dict[str, object] | None,
+) -> list[dict[str, object]]:
+    if not isinstance(knowledge_subgraph, dict):
+        return list(facts)
+
+    seeded_fact_ids = {str(item) for item in knowledge_subgraph.get("seed_fact_ids", []) if str(item).strip()}
+
+    def score(item: dict[str, object]) -> tuple[float, float]:
+        confidence = float(item.get("confidence") or 0.0)
+        bonus = float(item.get("_subgraph_bonus") or 0.0)
+        if str(item.get("fact_id") or "") in seeded_fact_ids:
+            bonus += 1.5
+        if item.get("_source_from_wiki"):
+            bonus += 1.0
+        return (bonus + confidence, confidence)
+
+    return sorted(facts, key=score, reverse=True)
+
+
+def _select_process_answer_facts(
+    facts: list[dict[str, object]],
+    knowledge_subgraph: dict[str, object] | None,
+) -> list[dict[str, object]]:
+    ranked = _prioritize_subgraph_facts(facts, knowledge_subgraph)
+
+    def process_score(item: dict[str, object]) -> tuple[float, float]:
+        confidence = float(item.get("confidence") or 0.0)
+        bonus = float(item.get("_subgraph_bonus") or 0.0)
+        fact_type = str(item.get("fact_type") or "")
+        if fact_type == "transition_fact":
+            bonus += 5.0
+        elif fact_type == "process_fact":
+            bonus += 4.0
+        elif fact_type == "table_requirement":
+            bonus += 1.0
+        return (bonus + confidence, confidence)
+
+    transitions = sorted((item for item in ranked if item.get("fact_type") == "transition_fact"), key=process_score, reverse=True)
+    processes = sorted((item for item in ranked if item.get("fact_type") == "process_fact"), key=process_score, reverse=True)
+    others = sorted(
+        (item for item in ranked if item.get("fact_type") not in {"transition_fact", "process_fact"}),
+        key=process_score,
+        reverse=True,
+    )
+    return transitions + processes + others
+
+
+def _select_definition_answer_facts(
+    facts: list[dict[str, object]],
+    knowledge_subgraph: dict[str, object] | None,
+) -> list[dict[str, object]]:
+    ranked = _prioritize_subgraph_facts(facts, knowledge_subgraph)
+
+    def definition_score(item: dict[str, object]) -> tuple[float, float]:
+        confidence = float(item.get("confidence") or 0.0)
+        bonus = float(item.get("_subgraph_bonus") or 0.0)
+        if item.get("fact_type") in {"term_definition", "concept_definition"}:
+            bonus += 4.0
+        elif item.get("fact_type") == "document_abstract":
+            bonus += 2.0
+        return (bonus + confidence, confidence)
+
+    return sorted(ranked, key=definition_score, reverse=True)
+
+
+def _select_constraint_answer_facts(
+    facts: list[dict[str, object]],
+    knowledge_subgraph: dict[str, object] | None,
+    query: str,
+    rewritten_payload: dict[str, object],
+) -> list[dict[str, object]]:
+    ranked = _prioritize_subgraph_facts(facts, knowledge_subgraph)
+    query_focus = _normalize_query_phrase(query)
+    topic_terms = _constraint_target_terms(query, rewritten_payload)
+
+    def constraint_score(item: dict[str, object]) -> tuple[float, float]:
+        confidence = float(item.get("confidence") or 0.0)
+        bonus = float(item.get("_subgraph_bonus") or 0.0)
+        fact_type = str(item.get("fact_type") or "")
+        payload = item.get("object_value")
+        blob = json.dumps(payload, ensure_ascii=False) if isinstance(payload, (dict, list)) else str(payload or "")
+        payload_dict = payload if isinstance(payload, dict) else {}
+        subject = str(payload_dict.get("subject") or "").strip()
+        topic = str(payload_dict.get("topic") or "").strip()
+        title = str(payload_dict.get("title") or "").strip()
+        scope_type = str(payload_dict.get("scope_type") or "").strip()
+        key_scope = f"{subject} {title}".strip()
+        if fact_type == "threshold":
+            bonus += 5.0
+        elif fact_type == "requirement":
+            bonus += 4.0
+        elif fact_type == "table_requirement":
+            bonus += 2.0
+        if scope_type == "normative_requirement":
+            bonus += 2.0
+        elif scope_type == "appendix_rule":
+            bonus += 1.2
+        elif scope_type in {"overview", "preface", "index"}:
+            bonus -= 8.0
+        if any(token in blob for token in ("前言", "前    言", "目 次", "目次")):
+            bonus -= 10.0
+        topic_scope = f"{topic} {key_scope}".strip()
+        if any(term and topic_scope and term in topic_scope for term in topic_terms):
+            bonus += 7.0
+        elif query_focus and topic_scope and query_focus in topic_scope:
+            bonus += 5.5
+        elif query_focus and query_focus in blob:
+            bonus += 1.5
+        elif query_focus:
+            bonus -= 2.0
+        return (bonus + confidence, confidence)
+
+    ranked = sorted(ranked, key=constraint_score, reverse=True)
+    if topic_terms:
+        strong_matches = []
+        for item in ranked:
+            payload = item.get("object_value")
+            payload_dict = payload if isinstance(payload, dict) else {}
+            topic_scope = " ".join(
+                str(payload_dict.get(key) or "").strip()
+                for key in ("topic", "subject", "title")
+            )
+            scope_type = str(payload_dict.get("scope_type") or "").strip()
+            if scope_type in {"overview", "preface", "index"}:
+                continue
+            if any(term and term in topic_scope for term in topic_terms):
+                strong_matches.append(item)
+        if strong_matches:
+            ranked = strong_matches + [item for item in ranked if item not in strong_matches]
+
+    constraint_first = [
+        item for item in ranked
+        if item.get("fact_type") in {"threshold", "requirement", "table_requirement"}
+    ]
+    if constraint_first:
+        return constraint_first + [
+            item for item in ranked
+            if item.get("fact_type") not in {"threshold", "requirement", "table_requirement"}
+        ]
+    return ranked
+
+
+def _constraint_target_terms(query: str, rewritten_payload: dict[str, object]) -> list[str]:
+    terms: list[str] = []
+
+    def add(value: str) -> None:
+        text = str(value or "").strip()
+        if not text:
+            return
+        if text not in terms:
+            terms.append(text)
+
+    add(str(rewritten_payload.get("target_topic") or ""))
+    add(_normalize_query_phrase(query))
+
+    for item in rewritten_payload.get("must_terms", []) or []:
+        text = str(item or "").strip()
+        if text and len(text) <= 16:
+            add(text)
+    for item in rewritten_payload.get("aliases", []) or []:
+        text = str(item or "").strip()
+        if text and len(text) <= 24 and not re.search(r"[A-Za-z]{5,}", text):
+            add(text)
+
+    cleaned: list[str] = []
+    for term in terms:
+        normalized = re.sub(r"(有什么要求|要求是什么|应满足什么|应符合什么)$", "", term).strip()
+        normalized = normalized.replace("的要求", "").strip()
+        if normalized and normalized not in cleaned:
+            cleaned.append(normalized)
+    return cleaned[:8]
+
+
+def _select_comparison_answer_facts(
+    facts: list[dict[str, object]],
+    knowledge_subgraph: dict[str, object] | None,
+) -> list[dict[str, object]]:
+    ranked = _prioritize_subgraph_facts(facts, knowledge_subgraph)
+
+    def comparison_score(item: dict[str, object]) -> tuple[float, float]:
+        confidence = float(item.get("confidence") or 0.0)
+        bonus = float(item.get("_subgraph_bonus") or 0.0)
+        fact_type = str(item.get("fact_type") or "")
+        if fact_type == "comparison_relation":
+            bonus += 5.0
+        elif fact_type in {"term_definition", "concept_definition"}:
+            bonus += 2.0
+        return (bonus + confidence, confidence)
+
+    return sorted(ranked, key=comparison_score, reverse=True)
+
+
+def _parameter_focus_terms(query: str, rewritten_payload: dict[str, object]) -> list[str]:
+    focus_terms: list[str] = []
+    explicit_code_focus = bool(re.search(r"\b(?:CC|CP|CC1|CC2|CP1|CP2)\b", query.upper()))
+
+    def add(value: str) -> None:
+        term = str(value or "").strip()
+        if term and term not in focus_terms:
+            focus_terms.append(term)
+
+    for match in re.finditer(r"\b[A-Z]{1,4}\d*\b", query.upper()):
+        add(match.group(0))
+    for match in re.finditer(r"(检测点\s*\d+)", query):
+        add(match.group(1))
+    for match in re.finditer(r"(表\s*[A-Z]?\d+(?:\.\d+)*)", query):
+        add(match.group(1))
+
+    for term in rewritten_payload.get("must_terms", []):
+        term = str(term)
+        if re.fullmatch(r"[A-Z]{1,4}\d*", term):
+            add(term)
+        elif re.search(r"(检测点\s*\d+)", term):
+            add(term)
+        elif (
+            not explicit_code_focus
+            and any(token in query for token in ("控制导引", "导引电路", "接口", "电阻", "阻值", "参数"))
+            and len(term) <= 8
+        ):
+            add(term)
+
+    for alias in rewritten_payload.get("aliases", []):
+        alias = str(alias)
+        if re.fullmatch(r"[A-Z]{1,4}\d*", alias):
+            add(alias)
+        elif re.search(r"(检测点\s*\d+)", alias) and not explicit_code_focus:
+            add(alias)
+        elif not explicit_code_focus and alias in {"控制导引", "控制导引电路"}:
+            add(alias)
+
+    if not focus_terms:
+        add(_normalize_query_phrase(query))
+    return focus_terms[:10]
+
+
+def _focus_term_bonus(blob: str, focus_terms: list[str]) -> float:
+    if not blob:
+        return 0.0
+    bonus = 0.0
+    for term in focus_terms:
+        if not term:
+            continue
+        if term in blob:
+            if re.fullmatch(r"[A-Z]{1,4}\d*", term):
+                bonus += 1.8
+            elif "检测点" in term:
+                bonus += 1.6
+            else:
+                bonus += 0.8
+    return bonus
+
+
+def _filter_graph_edges(
+    workspace_root: Path,
+    edges: list[dict[str, object]],
+    facts: list[dict[str, object]],
+    intent: str,
+    doc_id: str | None,
+) -> list[dict[str, object]]:
     entity_ids: set[str] = set()
     for item in facts[:8]:
         if item.get("subject_entity_id"):
@@ -603,7 +1456,81 @@ def _filter_graph_edges(edges: list[dict[str, object]], facts: list[dict[str, ob
         for edge in edges
         if edge.get("src_entity_id") in entity_ids or edge.get("dst_entity_id") in entity_ids
     ]
-    return filtered or edges
+    candidates = filtered or edges
+    if not candidates and entity_ids:
+        candidates = _load_graph_edges_for_entities(workspace_root, entity_ids, doc_id)
+
+    def score(edge: dict[str, object]) -> tuple[float, float]:
+        confidence = float(edge.get("confidence") or 0.0)
+        bonus = 0.0
+        relation = str(edge.get("relation") or "")
+        if intent == "process":
+            if relation == "has_process":
+                bonus += 3.0
+            elif relation == "relates_to_term":
+                bonus += 1.0
+        elif intent == "parameter":
+            if relation == "has_parameter_group":
+                bonus += 3.0
+            elif relation == "relates_to_term":
+                bonus += 1.0
+        elif intent == "definition":
+            if relation == "defines_term":
+                bonus += 3.0
+            elif relation == "relates_to_term":
+                bonus += 1.0
+        elif intent == "constraint":
+            if relation == "has_constraint":
+                bonus += 3.0
+            elif relation == "relates_to_term":
+                bonus += 0.8
+        elif intent == "comparison":
+            if relation == "has_comparison":
+                bonus += 3.0
+            elif relation == "relates_to_term":
+                bonus += 0.8
+        if edge.get("src_entity_id") in entity_ids or edge.get("dst_entity_id") in entity_ids:
+            bonus += 0.8
+        return (bonus + confidence, confidence)
+
+    ranked = sorted(candidates, key=score, reverse=True)
+    deduped: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for edge in ranked:
+        edge_id = str(edge.get("edge_id") or "")
+        if edge_id and edge_id not in seen:
+            seen.add(edge_id)
+            deduped.append(edge)
+    return deduped[:8]
+
+
+def _load_graph_edges_for_entities(
+    workspace_root: Path,
+    entity_ids: set[str],
+    doc_id: str | None,
+) -> list[dict[str, object]]:
+    if not entity_ids:
+        return []
+
+    paths = AppPaths.from_root(workspace_root)
+    connection = connect(paths.db_file)
+    try:
+        placeholders = ",".join("?" for _ in entity_ids)
+        where_scope = " AND version_scope = ? " if doc_id else ""
+        rows = connection.execute(
+            f"""
+            SELECT edge_id, src_entity_id, relation, dst_entity_id, version_scope, confidence
+            FROM graph_edges
+            WHERE (src_entity_id IN ({placeholders}) OR dst_entity_id IN ({placeholders}))
+            {where_scope}
+            ORDER BY confidence DESC, edge_id ASC
+            LIMIT 24
+            """,
+            [*entity_ids, *entity_ids, *([doc_id] if doc_id else [])],
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        connection.close()
 
 
 def _filter_wiki_pages(

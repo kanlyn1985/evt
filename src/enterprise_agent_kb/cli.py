@@ -17,10 +17,17 @@ from .governance import assess_pending_quality
 from .ingest import register_document
 from .jobs import run_parse_jobs, summarize_job_results
 from .parse import parse_document
-from .pipeline import run_batch_pipeline, run_document_pipeline, run_file_pipeline
+from .pipeline import (
+    run_batch_pipeline,
+    run_document_pipeline,
+    run_document_pipeline_and_tests,
+    run_file_pipeline,
+    run_file_pipeline_and_tests,
+)
 from .query_api import build_query_context
 from .quality import assess_document_quality
 from .retrieval import search_knowledge_base
+from .workspace_admin import reset_workspace_data
 from .wiki_compiler import build_wiki_for_document
 
 
@@ -52,6 +59,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to the source file to ingest.",
     )
 
+    reset_parser = subparsers.add_parser(
+        "reset-workspace",
+        help="Delete ingested records and generated artifacts.",
+    )
+    reset_parser.add_argument(
+        "--drop-raw",
+        action="store_true",
+        help="Also delete files under raw/.",
+    )
+
     parse_parser = subparsers.add_parser(
         "parse-document",
         help="Parse a registered document into pages and blocks.",
@@ -60,6 +77,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--doc-id",
         required=True,
         help="Document ID to parse.",
+    )
+
+    convert_document_parser = subparsers.add_parser(
+        "convert-document",
+        help="Only parse/convert a registered document and stop after normalized output.",
+    )
+    convert_document_parser.add_argument(
+        "--doc-id",
+        required=True,
+        help="Document ID to convert.",
     )
 
     jobs_parser = subparsers.add_parser(
@@ -229,6 +256,38 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to the source file.",
     )
 
+    convert_file_parser = subparsers.add_parser(
+        "convert-file",
+        help="Register a source file and only run parse/convert.",
+    )
+    convert_file_parser.add_argument(
+        "--file",
+        type=Path,
+        required=True,
+        help="Path to the source file.",
+    )
+
+    build_document_test_parser = subparsers.add_parser(
+        "build-document-and-test",
+        help="Run the full pipeline and golden tests for a registered document.",
+    )
+    build_document_test_parser.add_argument(
+        "--doc-id",
+        required=True,
+        help="Document ID to build and test end-to-end.",
+    )
+
+    build_file_test_parser = subparsers.add_parser(
+        "build-file-and-test",
+        help="Register a source file, run the full pipeline, and execute golden tests.",
+    )
+    build_file_test_parser.add_argument(
+        "--file",
+        type=Path,
+        required=True,
+        help="Path to the source file.",
+    )
+
     build_batch_parser = subparsers.add_parser(
         "build-batch",
         help="Run the full pipeline for multiple registered documents.",
@@ -296,6 +355,21 @@ def main() -> None:
         )
         return
 
+    if args.command == "reset-workspace":
+        result = reset_workspace_data(args.root, keep_raw=not args.drop_raw)
+        print(
+            json.dumps(
+                {
+                    "keep_raw": result.keep_raw,
+                    "deleted_rows": result.deleted_rows,
+                    "deleted_files": result.deleted_files,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return
+
     if args.command == "parse-document":
         result = parse_document(args.root, args.doc_id)
         print(
@@ -306,6 +380,24 @@ def main() -> None:
                     "block_count": result.block_count,
                     "normalized_path": str(result.normalized_path),
                     "parser_engine": result.parser_engine,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return
+
+    if args.command == "convert-document":
+        result = parse_document(args.root, args.doc_id)
+        print(
+            json.dumps(
+                {
+                    "doc_id": result.doc_id,
+                    "page_count": result.page_count,
+                    "block_count": result.block_count,
+                    "normalized_path": str(result.normalized_path),
+                    "parser_engine": result.parser_engine,
+                    "mode": "convert_only",
                 },
                 indent=2,
                 ensure_ascii=False,
@@ -447,6 +539,37 @@ def main() -> None:
 
     if args.command == "build-file":
         result = run_file_pipeline(args.root, args.file)
+        print(json.dumps(result.__dict__, indent=2, ensure_ascii=False))
+        return
+
+    if args.command == "convert-file":
+        register_result = register_document(args.root, args.file)
+        result = parse_document(args.root, register_result.doc_id)
+        print(
+            json.dumps(
+                {
+                    "doc_id": result.doc_id,
+                    "registered": True,
+                    "deduplicated": register_result.deduplicated,
+                    "page_count": result.page_count,
+                    "block_count": result.block_count,
+                    "normalized_path": str(result.normalized_path),
+                    "parser_engine": result.parser_engine,
+                    "mode": "convert_only",
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return
+
+    if args.command == "build-document-and-test":
+        result = run_document_pipeline_and_tests(args.root, args.doc_id)
+        print(json.dumps(result.__dict__, indent=2, ensure_ascii=False))
+        return
+
+    if args.command == "build-file-and-test":
+        result = run_file_pipeline_and_tests(args.root, args.file)
         print(json.dumps(result.__dict__, indent=2, ensure_ascii=False))
         return
 

@@ -15,6 +15,9 @@
 - MCP stdio server
 - browser demo page
 - one-click launch scripts
+- standalone PDF conversion entrypoints
+- build-and-test one-click entrypoints
+- workbench user guide
 
 ## Verified document types
 
@@ -54,6 +57,18 @@ Demo:
 
 ```powershell
 .\launch.ps1
+```
+
+Workbench guide:
+
+```text
+docs/workbench_user_guide_2026-04-20.md
+```
+
+Quickstart:
+
+```text
+docs/delivery_quickstart_2026-04-20.md
 ```
 
 ## Known limitations

@@ -34,6 +34,8 @@ def _page_metrics(page: dict[str, object]) -> dict[str, object]:
 
     for block in blocks:
         block_type = str(block.get("block_type", ""))
+        if block_type == "structure_markdown":
+            continue
         text = str(block.get("text", "")).strip()
         if text:
             text_blocks += 1
